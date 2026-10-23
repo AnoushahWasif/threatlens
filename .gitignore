@@ -1,0 +1,13 @@
+node_modules/
+.next/
+__pycache__/
+.venv/
+*.py[cod]
+.env
+.env.local
+.terraform/
+*.tfstate
+*.tfstate.*
+.DS_Store
+.vscode/
+.idea/
