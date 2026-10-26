@@ -1,5 +1,7 @@
 # ThreatLens
 
+[![CI](https://github.com/AnoushahWasif/threatlens/actions/workflows/ci.yml/badge.svg)](https://github.com/AnoushahWasif/threatlens/actions/workflows/ci.yml)
+
 > Work in progress. Started October 2026.
 
 An application security workspace that helps a small team decide what to fix first.
@@ -21,6 +23,17 @@ Most scanners return hundreds of CVEs sorted by CVSS, and most of those will nev
 - **API:** Python 3.12, FastAPI, Pydantic v2
 - **AWS:** S3 + CloudFront, API Gateway + Lambda, DynamoDB, SQS, Cognito, Secrets Manager, KMS. Terraform for all of it, deployed from GitHub Actions with OIDC (no stored AWS keys)
 - **Security pipeline:** Gitleaks, Semgrep, Trivy, SBOM of ThreatLens itself
+
+## Repo layout
+
+```
+apps/api/     FastAPI service and scan worker (Python, uv)
+apps/web/     Next.js frontend (pnpm), from Day 7
+infra/        Terraform for AWS, from Day 15
+docs/         architecture and threat model
+```
+
+`make install`, `make lint` and `make test` run against the API. CI runs the same checks plus a Gitleaks scan of the full git history on every push.
 
 ## Architecture
 
