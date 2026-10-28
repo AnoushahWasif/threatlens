@@ -35,7 +35,8 @@ PackageName = Annotated[
     str, Field(min_length=1, max_length=214, pattern=r"^[A-Za-z0-9@][A-Za-z0-9._\-/:@]*$")
 ]
 Version = Annotated[str, Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9._\-+~^:]+$")]
-VulnId = Annotated[str, Field(max_length=64, pattern=r"^[A-Z][A-Z0-9]*-[A-Za-z0-9\-:]+$")]
+VULN_ID_PATTERN = r"^[A-Z][A-Z0-9]*-[A-Za-z0-9\-:.]{1,60}$"
+VulnId = Annotated[str, Field(max_length=64, pattern=VULN_ID_PATTERN)]
 
 
 def _now() -> datetime:
@@ -70,5 +71,6 @@ class Finding(Strict):
     cvss_score: float | None = Field(default=None, ge=0, le=10)
     epss: float | None = Field(default=None, ge=0, le=1)
     in_kev: bool = False
-    risk_score: float = Field(ge=0, le=100)
+    # None means "not scored" (no EPSS data and not in KEV), which is not the same as zero risk.
+    risk_score: float | None = Field(default=None, ge=0, le=100)
     fixed_versions: list[Version] = Field(default_factory=list, max_length=50)

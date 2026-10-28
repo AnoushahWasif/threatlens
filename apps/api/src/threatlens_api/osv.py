@@ -17,17 +17,17 @@ from urllib.parse import quote
 import httpx
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from threatlens_api import __version__
-from threatlens_api.models import Dependency, Ecosystem, Severity
+from threatlens_api.fetch import MAX_RETRY_AFTER, FetchError, JsonFetcher, default_http
+from threatlens_api.models import VULN_ID_PATTERN, Dependency, Ecosystem, Severity
+
+__all__ = ["MAX_RETRY_AFTER", "OsvClient", "OsvError", "TTLCache", "Vuln", "merge_aliases"]
 
 BASE_URL = "https://api.osv.dev"
 BATCH_SIZE = 1000  # OSV's own limit per querybatch call
 MAX_PAGES = 10
 MAX_RESPONSE_BYTES = 10_000_000
-MAX_RETRY_AFTER = 30.0
-RETRY_STATUSES = {429, 500, 502, 503, 504}
 
-VULN_ID = re.compile(r"^[A-Z][A-Z0-9]*-[A-Za-z0-9\-:.]{1,60}$")
+VULN_ID = re.compile(VULN_ID_PATTERN)
 VERSION = re.compile(r"^[A-Za-z0-9._\-+~^:]{1,128}$")
 GHSA_SEVERITY = {
     "CRITICAL": Severity.CRITICAL,
@@ -40,7 +40,7 @@ GHSA_SEVERITY = {
 DepKey = tuple[Ecosystem, str, str]
 
 
-class OsvError(Exception):
+class OsvError(FetchError):
     pass
 
 
@@ -165,15 +165,6 @@ class ScanResult:
         return not self.failed
 
 
-def default_http() -> httpx.Client:
-    return httpx.Client(
-        base_url=BASE_URL,
-        timeout=httpx.Timeout(10.0, connect=5.0),
-        follow_redirects=False,
-        headers={"user-agent": f"threatlens/{__version__}"},
-    )
-
-
 def key(dep: Dependency) -> DepKey:
     return (dep.ecosystem, dep.name, dep.version)
 
@@ -188,36 +179,15 @@ class OsvClient:
         backoff: float = 0.5,
         sleep: Callable[[float], None] = time.sleep,
     ):
-        self.http = http or default_http()
+        self.fetch = JsonFetcher(
+            http or default_http(BASE_URL), "OSV", OsvError, max_retries, backoff, sleep
+        )
         # `is None`, not `or`: an empty cache has len 0 and would be falsy.
         self.ids_cache = TTLCache(ttl=6 * 3600) if ids_cache is None else ids_cache
         self.vuln_cache = TTLCache(ttl=24 * 3600) if vuln_cache is None else vuln_cache
-        self.max_retries, self.backoff, self.sleep = max_retries, backoff, sleep
 
     def _request(self, method: str, path: str, body: dict | None = None) -> dict:
-        reason, delay = "no attempt made", 0.0
-        for attempt in range(self.max_retries + 1):
-            if attempt:
-                self.sleep(delay)
-            try:
-                resp = self.http.request(method, path, json=body)
-            except httpx.TransportError as exc:
-                reason = type(exc).__name__
-                delay = self.backoff * 2**attempt
-                continue
-            if resp.status_code in RETRY_STATUSES:
-                reason = f"HTTP {resp.status_code}"
-                delay = _retry_after(resp) or self.backoff * 2**attempt
-                continue
-            if resp.status_code != 200:
-                raise OsvError(f"OSV returned HTTP {resp.status_code}")
-            if len(resp.content) > MAX_RESPONSE_BYTES:
-                raise OsvError("OSV response too large")
-            try:
-                return resp.json()
-            except ValueError as exc:
-                raise OsvError("OSV response is not JSON") from exc
-        raise OsvError(f"OSV unavailable after {self.max_retries + 1} attempts ({reason})")
+        return self.fetch.request(method, path, body=body, max_bytes=MAX_RESPONSE_BYTES)
 
     def _query_pages(self, query: dict, first: _BatchResult) -> list[str]:
         ids = [v.id for v in first.vulns]
@@ -318,10 +288,3 @@ def merge_aliases(vulns: list[Vuln]) -> list[Vuln]:
         seen |= names
         kept.append(vuln)
     return kept
-
-
-def _retry_after(resp: httpx.Response) -> float | None:
-    try:
-        return min(float(resp.headers["retry-after"]), MAX_RETRY_AFTER)
-    except (KeyError, ValueError):
-        return None
