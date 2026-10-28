@@ -18,7 +18,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from threatlens_api.fetch import MAX_RETRY_AFTER, FetchError, JsonFetcher, default_http
-from threatlens_api.models import Dependency, Ecosystem, Severity
+from threatlens_api.models import VULN_ID_PATTERN, Dependency, Ecosystem, Severity
 
 __all__ = ["MAX_RETRY_AFTER", "OsvClient", "OsvError", "TTLCache", "Vuln", "merge_aliases"]
 
@@ -27,7 +27,7 @@ BATCH_SIZE = 1000  # OSV's own limit per querybatch call
 MAX_PAGES = 10
 MAX_RESPONSE_BYTES = 10_000_000
 
-VULN_ID = re.compile(r"^[A-Z][A-Z0-9]*-[A-Za-z0-9\-:.]{1,60}$")
+VULN_ID = re.compile(VULN_ID_PATTERN)
 VERSION = re.compile(r"^[A-Za-z0-9._\-+~^:]{1,128}$")
 GHSA_SEVERITY = {
     "CRITICAL": Severity.CRITICAL,
