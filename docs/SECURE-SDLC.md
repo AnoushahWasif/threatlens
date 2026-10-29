@@ -42,14 +42,16 @@ Security requirements written as tests, so they can't silently regress:
 | CWE-674 uncontrolled recursion | Nested CycloneDX walked with an explicit stack |
 | CWE-918 SSRF | OSV, EPSS and KEV clients have fixed base URLs and never follow redirects (`test_redirects_are_not_followed`, `test_redirect_is_not_followed`) |
 | CWE-345 insufficient verification of data | EPSS values must be finite probabilities; rows for CVEs we didn't ask about are dropped; a KEV feed with a wrong count or under 1000 entries is rejected (`test_values_that_are_not_probabilities_fail_the_chunk`, `test_count_mismatch_is_rejected`) |
-| CWE-209 info in error messages | One error shape, only `loc` and `msg` from validation |
+| CWE-209 info in error messages | One error shape, only `loc` and `msg` from validation. The web app only shows its own fixed messages, never exception text (`never shows the text of an unexpected exception`) |
+| CWE-79 XSS | React escapes text; no `dangerouslySetInnerHTML`; a test renders an `<img onerror>` project name and checks no element is created. CSP from CloudFront later (decision 14) |
+| CWE-20 on the client | API responses are zod-validated before rendering; unknown fields are dropped; `NEXT_PUBLIC_API_URL` must be https (http only for localhost) with no credentials or query string |
 | CWE-1333 ReDoS | Regexes are anchored with bounded repetition, no nested quantifiers |
 
 ## 6. Secure software testing
 
 - Failure modes are tested, not just the happy path: crashes, malformed input, hostile ids, outages, endless pagination.
 - Third-party API tests run on responses recorded from the real service, so the parser is tested against the real format without network flakiness.
-- 219 tests, run in CI on every push.
+- 219 API tests and 43 web tests, run in CI on every push.
 
 ## 7. Secure deployment, operations and maintenance
 
