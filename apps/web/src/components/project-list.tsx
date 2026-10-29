@@ -1,3 +1,5 @@
+import Link from "next/link";
+
 import {
   Table,
   TableBody,
@@ -39,7 +41,14 @@ export function ProjectList({ projects }: { projects: Project[] }) {
       <TableBody>
         {projects.map((project) => (
           <TableRow key={project.id}>
-            <TableCell className="font-medium">{project.name}</TableCell>
+            <TableCell className="font-medium">
+              <Link
+                href={`/findings?project=${encodeURIComponent(project.id)}`}
+                className="underline-offset-4 hover:underline"
+              >
+                {project.name}
+              </Link>
+            </TableCell>
             <TableCell className="text-muted-foreground max-w-md truncate">
               {project.description || "—"}
             </TableCell>
