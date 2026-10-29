@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 
+import { FindingsSummary } from "@/components/findings-summary";
 import { FindingsTable } from "@/components/findings-table";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -44,6 +45,7 @@ export function FindingsView({ projectId }: { projectId: string }) {
           Sample data: no API is configured (set <code>NEXT_PUBLIC_API_URL</code>).
         </p>
       )}
+      <FindingsSummary findings={state.findings} />
       <FindingsTable findings={state.findings} />
     </div>
   );
