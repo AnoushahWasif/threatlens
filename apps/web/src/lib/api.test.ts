@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { ApiError, fetchProjects, MAX_RESPONSE_BYTES, TIMEOUT_MS } from "@/lib/api";
+import { ApiError, fetchFindings, fetchProjects, MAX_RESPONSE_BYTES, TIMEOUT_MS } from "@/lib/api";
+import { SAMPLE_FINDINGS } from "@/lib/findings";
 import { MAX_PROJECTS, SAMPLE_PROJECTS } from "@/lib/projects";
 
 const BASE = "https://api.threatlens.dev";
@@ -128,5 +129,57 @@ describe("fetchProjects", () => {
     });
     const error = await fetchProjects({ baseUrl: BASE, fetchImpl, signal: controller.signal }).catch((e) => e);
     expect(error).not.toBeInstanceOf(ApiError);
+  });
+});
+
+describe("fetchFindings", () => {
+  const SAMPLE_ID = "3f6c2a1e-8d4b-4c7a-9e21-5b0d7f3a9c11";
+  const OTHER_ID = "0b8f6a52-3c1d-4e9a-8f27-6d5c4b3a2e10";
+
+  it.each(["", "not-a-uuid", "../admin", `${OTHER_ID}/../../users`, `${OTHER_ID}?x=1`])(
+    "refuses project id %j before any request",
+    async (id) => {
+      const fetchImpl = vi.fn<typeof fetch>();
+      const error = await failure(fetchFindings(id, { baseUrl: BASE, fetchImpl }));
+      expect(error.kind).toBe("not-found");
+      expect(fetchImpl).not.toHaveBeenCalled();
+    },
+  );
+
+  it("returns sample findings for the sample project without a request", async () => {
+    const result = await fetchFindings(SAMPLE_ID, { baseUrl: null });
+    expect(result).toEqual({ source: "sample", findings: SAMPLE_FINDINGS });
+  });
+
+  it("treats an unknown project in sample mode as not found", async () => {
+    const error = await failure(fetchFindings(OTHER_ID, { baseUrl: null }));
+    expect(error.kind).toBe("not-found");
+  });
+
+  it("calls the project's findings path and validates the response", async () => {
+    const fetchImpl = respond(SAMPLE_FINDINGS);
+    const result = await fetchFindings(SAMPLE_ID, { baseUrl: BASE, fetchImpl });
+    expect(fetchImpl.mock.calls[0][0]).toBe(`${BASE}/projects/${SAMPLE_ID}/findings`);
+    expect(result.findings).toHaveLength(SAMPLE_FINDINGS.length);
+  });
+
+  it("turns 404 into not-found (same answer for missing and not yours)", async () => {
+    const error = await failure(
+      fetchFindings(OTHER_ID, { baseUrl: BASE, fetchImpl: respond("{}", { status: 404 }) }),
+    );
+    expect(error.kind).toBe("not-found");
+  });
+
+  it("keeps other HTTP errors as http errors", async () => {
+    const error = await failure(
+      fetchFindings(OTHER_ID, { baseUrl: BASE, fetchImpl: respond("{}", { status: 503 }) }),
+    );
+    expect(error.kind).toBe("http");
+  });
+
+  it("rejects a finding with a hostile id", async () => {
+    const bad = [{ ...SAMPLE_FINDINGS[0], vuln_id: "javascript:alert(1)" }];
+    const error = await failure(fetchFindings(OTHER_ID, { baseUrl: BASE, fetchImpl: respond(bad) }));
+    expect(error.kind).toBe("invalid");
   });
 });
