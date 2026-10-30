@@ -8,7 +8,11 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from threatlens_api import __version__
+from threatlens_api.drafting import ClaudeDrafter, DraftBudget, Drafter
+from threatlens_api.errors import ApiError
+from threatlens_api.routes_threats import router as threats_router
 from threatlens_api.settings import Settings, get_settings
+from threatlens_api.store import ThreatModelStore
 
 log = logging.getLogger("threatlens")
 
@@ -39,6 +43,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         openapi_url=None if settings.is_prod else "/openapi.json",
     )
     app.state.settings = settings
+    app.state.threat_models = ThreatModelStore()
+    app.state.drafter = make_drafter(settings)
+    app.state.draft_budget = DraftBudget(settings.llm_drafts_per_hour)
 
     app.add_middleware(
         CORSMiddleware,
@@ -76,6 +83,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         code = {404: "not_found", 405: "method_not_allowed"}.get(exc.status_code, "http_error")
         return error(exc.status_code, code, str(exc.detail), request.state.request_id)
 
+    @app.exception_handler(ApiError)
+    async def api_error(request: Request, exc: ApiError):
+        response = error(exc.status, exc.code, exc.message, request.state.request_id)
+        response.headers.update(exc.headers)
+        return response
+
     @app.exception_handler(RequestValidationError)
     async def validation_error(request: Request, exc: RequestValidationError):
         # FastAPI's default echoes the submitted input back; keep only where and what went wrong.
@@ -86,7 +99,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def health():
         return {"status": "ok", "version": __version__}
 
+    app.include_router(threats_router)
     return app
+
+
+def make_drafter(settings: Settings) -> Drafter | None:
+    if settings.llm_provider == "anthropic" and settings.llm_api_key is not None:
+        return ClaudeDrafter(settings.llm_api_key.get_secret_value(), settings.llm_model)
+    return None
 
 
 def _valid_request_id(value: str) -> bool:

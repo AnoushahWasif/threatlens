@@ -35,6 +35,18 @@ docs/         architecture and threat model
 
 `make install`, `make lint` and `make test` run against the API. CI runs the same checks plus a Gitleaks scan of the full git history on every push.
 
+## Threat-model drafting (API)
+
+| Route | What it does |
+|-------|--------------|
+| `POST /threat-models` | Save a name and an architecture description (40–8,000 characters) |
+| `POST /threat-models/{id}/draft` | Ask the LLM for STRIDE threats; they're stored with status `draft` |
+| `GET /threat-models/{id}` | Read the model and its threats |
+| `POST /threat-models/{id}/threats` | Add a threat by hand (stored as `accepted`) |
+| `PATCH` / `DELETE /threat-models/{id}/threats/{threat_id}` | Edit, accept, reject or remove a threat |
+
+Drafting is **off by default**, so the route answers `503 llm_disabled`. To turn it on, set `THREATLENS_LLM_PROVIDER=anthropic` and `THREATLENS_LLM_API_KEY` in `apps/api/.env`. Each draft is a paid API call, so the API allows 20 per hour (`THREATLENS_LLM_DRAFTS_PER_HOUR`). Re-drafting replaces only drafts nobody has touched. Threat models live in memory until persistence lands (day 13), and there's no auth yet (day 12), so don't expose this API.
+
 ## Architecture
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), which includes a threat model of ThreatLens itself.
