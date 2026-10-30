@@ -115,6 +115,11 @@ The first idea was `EPSS × weight × (2 if in KEV)`. On real numbers that left 
 | 16 | Findings page is `/findings?project=<id>`; the id must be a UUID before it goes into the API path, and a 404 reads "doesn't exist, or you don't have access" (Day 8) | A static export can't pre-render a page per project. One message for missing and forbidden means ids can't be probed |
 | 17 | In the findings table, missing risk and EPSS sort last in both directions | Sorting ascending would otherwise put "no data" at the top, where it reads as "safest" |
 | 18 | Open: Next 16 prefetches `findings/__next.findings.__PAGE__.txt`, but the export writes `findings/__next.findings/__PAGE__.txt`. Needs a CloudFront rewrite (Day 15/16) | Until then only the prefetch 404s; the link still works as a normal page load |
+| 19 | LLM drafting goes through a small `Drafter` interface; the one adapter is Claude (`claude-opus-5-5`), and it's **off unless `THREATLENS_LLM_PROVIDER=anthropic`** and a key is set (Day 10) | No key, no outbound call, no cost until it's switched on on purpose. Tests use a fake drafter and the real SDK against a mocked HTTP layer, so the suite never needs a key |
+| 20 | Structured JSON output from the API, then validated again with our own Pydantic models: bad items dropped, duplicates dropped, at most 25 threats, and zero usable threats is an error | The API schema can't express our length limits. Failing closed means a broken answer never shows up as an empty "no threats" model |
+| 21 | Re-drafting replaces only untouched LLM drafts. Anything accepted, rejected, edited or written by hand stays | A second draft must never throw away a person's review work |
+| 22 | At most 20 drafts per rolling hour across the API (`THREATLENS_LLM_DRAFTS_PER_HOUR`), counted before the call | Each draft is a paid call. A failed call can still be billed, so it still counts |
+| 23 | Server-side refusal fallback (`fallbacks: "default"`) is on | Threat modelling describes attacks, so a safety classifier can decline. The API then retries on its fallback model; if that also declines, the user gets "write the threats by hand" |
 
 ## Threat model of ThreatLens (STRIDE)
 
@@ -124,11 +129,12 @@ Trust boundaries: browser ↔ API Gateway, API ↔ outside APIs (OSV, EPSS, KEV,
 |--------|--------|------------|
 | **Spoofing** | Someone calls the API as another user | Cognito JWTs checked at API Gateway. The user id comes from the token, never from the request body |
 | **Tampering** | A crafted SBOM/lockfile exploits the parser (huge file, deep nesting, zip bomb) | Size limit on the presigned upload, strict parsers with depth limits, the worker has no network access except the allow-listed APIs |
-| **Tampering** | Prompt injection in the architecture text changes the LLM's output | The output must match a fixed schema (STRIDE category, threat, mitigation). It's shown as a draft only and never executed or used to call tools |
+| **Tampering** | Prompt injection in the architecture text changes the LLM's output | The text is wrapped in `<architecture>` tags (a closing tag inside it is defanged) and the system prompt says it's data, not instructions. The output must match a fixed schema and is validated again on our side. It's shown as a draft only and never executed or used to call tools. Injection can still bend *what* the draft says, which is why a person accepts each threat |
 | **Repudiation** | A user denies accepting or rejecting a threat | Every accept/reject is stored with the user id and a timestamp. API calls are logged to CloudWatch |
 | **Information disclosure** | One user reads another's projects (IDOR) | Partition key includes the user id, and tests check that cross-user reads return 404 |
 | **Information disclosure** | The LLM API key leaks | Kept in Secrets Manager, read at runtime by the API role only. Gitleaks in CI and push protection on the repo |
 | **Information disclosure** | Uploaded SBOMs are publicly readable | Private bucket, block public access, KMS encryption, presigned URLs that expire in minutes |
 | **Denial of service** | Huge scans or many scans run up the AWS bill | API Gateway throttling, per-user scan limit, SQS batch size limit, AWS budget alarm |
+| **Denial of service** | Repeated drafting runs up the LLM bill | Drafting off by default, 20 drafts per hour cap, architecture text capped at 8,000 characters, `max_tokens` set, provider spend limit on the key |
 | **Denial of service** | OSV/EPSS rate-limit or go down | Cache responses in DynamoDB with a TTL, back off and retry, and mark the scan "partial" instead of failing |
 | **Elevation of privilege** | A compromised Lambda reaches other AWS resources | One IAM role per function, least privilege (the worker can't read secrets, the API can't read the queue) |

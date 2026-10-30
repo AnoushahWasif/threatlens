@@ -35,6 +35,30 @@ def test_prod_rejects_short_key():
         prod(llm_api_key="short")
 
 
+def test_llm_is_off_by_default():
+    assert Settings(_env_file=None).llm_provider == "off"
+
+
+def test_turning_llm_on_needs_a_key_in_any_environment():
+    with pytest.raises(ValidationError, match="LLM provider is on"):
+        Settings(llm_provider="anthropic", _env_file=None)
+    with pytest.raises(ValidationError, match="LLM provider is on"):
+        Settings(llm_provider="anthropic", llm_api_key="short", _env_file=None)
+
+
+@pytest.mark.parametrize("model", ["", "Claude Opus", "../../v1/admin", "a" * 70])
+def test_rejects_odd_model_names(model):
+    with pytest.raises(ValidationError):
+        Settings(llm_model=model, _env_file=None)
+
+
+def test_rejects_unknown_provider_and_bad_draft_cap():
+    with pytest.raises(ValidationError):
+        Settings(llm_provider="openai", _env_file=None)
+    with pytest.raises(ValidationError):
+        Settings(llm_drafts_per_hour=0, _env_file=None)
+
+
 def test_prod_rejects_wildcard_cors():
     with pytest.raises(ValidationError, match="Wildcard"):
         prod(cors_origins=["*"])
