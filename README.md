@@ -64,7 +64,17 @@ THREATLENS_STORE=dynamodb
 THREATLENS_DYNAMODB_ENDPOINT_URL=http://localhost:8000
 ```
 
-The API creates the table there on start (in AWS, Terraform will own it). Every save checks the version it read, so two edits at once can't overwrite each other. CI runs the whole API test suite a second time against DynamoDB Local. `GET/POST /projects` and `GET /projects/{id}` exist now; findings for a project arrive with scans on day 14.
+The API creates the table there on start (in AWS, Terraform will own it). Every save checks the version it read, so two edits at once can't overwrite each other. CI runs the whole API test suite a second time against DynamoDB Local. Projects have `GET/POST /projects` and `GET /projects/{id}`.
+
+## Scans
+
+```bash
+curl -X POST "$API/projects/$PROJECT/scans?filename=requirements.txt" \
+  -H "Authorization: Bearer $TOKEN" --data-binary @requirements.txt
+# 202, scan "queued"; poll GET /projects/$PROJECT/scans/$SCAN, then GET /projects/$PROJECT/findings
+```
+
+The API reads the file straight away (CycloneDX JSON, `requirements.txt` or `package-lock.json`, up to 1 MB) and refuses a bad one with a 422. The network part, OSV, EPSS and KEV, runs in a worker from a queue. On a real 4-line `requirements.txt` the upload answered in 0.22 s, and the scan finished 22 s later with 24 findings. A partial scan (OSV or EPSS couldn't answer for some packages) says so in its counts instead of looking clean. Locally the worker is a thread inside the API; in AWS it will be a Lambda fed by SQS (day 15). Limits: 10 scans per user per hour.
 
 ## Architecture
 
