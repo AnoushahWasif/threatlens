@@ -50,11 +50,21 @@ flowchart TB
 | Web (Next.js) | Project list, findings table, dashboard, threat-model editor |
 | API (FastAPI on Lambda) | Auth check, CRUD for projects/findings/threats, starts scans, calls the LLM for drafts |
 | Worker (Lambda, SQS-triggered) | Parses the SBOM, queries OSV, enriches with EPSS + KEV, computes the risk score, writes findings |
-| DynamoDB | One table, partitioned by user, so a user can only ever query their own items |
+| DynamoDB | One table, partitioned by user, so a user can only ever query their own items. Layout below |
 | S3 (uploads) | Raw SBOM files, private bucket, short-lived presigned URLs |
 | Cognito | Sign-up/sign-in, issues JWTs that API Gateway checks |
 
-Local development runs the API and worker as plain processes, with an in-memory queue and a local DynamoDB, so no AWS account is needed to work on it.
+Local development runs the API and worker as plain processes, with an in-memory queue and either the in-memory store or DynamoDB Local, so no AWS account is needed to work on it.
+
+### DynamoDB layout (Day 13)
+
+| pk | sk | Item |
+|----|----|------|
+| `USER#<sub>` | `TM#<id>` | A threat model with its threats, as one JSON body, plus `ver` (version) and the draft lease (`draft_until`, `draft_lease`) |
+| `USER#<sub>` | `PROJECT#<id>` | A project, as JSON |
+| `USER#<sub>` | `COUNTS` | `threat_models` and `projects` counts, for the per-user caps |
+
+Access patterns: get one item by key (strongly consistent read), list a user's projects (Query on `pk` with `begins_with(sk, "PROJECT#")`, every page followed), create (transaction: counter below cap + put if new), change (update if `ver` still matches). Nothing scans the table. The owner's `sub` is never stored in a body; it's the key.
 
 ## Data flow: a scan
 
@@ -128,6 +138,13 @@ The first idea was `EPSS × weight × (2 if in KEV)`. On real numbers that left 
 | 29 | Web sign-in: Cognito hosted UI with authorization code + PKCE (no client secret), one-time `state` checked and deleted on return, code removed from the address bar. Only the access token is kept, in `sessionStorage`; ID and refresh tokens are dropped. `?next=` must be a same-site path | A static site can't keep an httpOnly cookie, so the token is readable by script and the strict CSP (decision 14) is the XSS defence. Tab-only storage and no refresh token cap a stolen token at its one-hour life. A checked `next` stops open redirects |
 | 30 | Sign-in is skipped when no API is configured | The app then shows only labelled sample data, and there's nothing to protect |
 | 31 | Tokens are checked in the threadpool, Cognito's keys are fetched at startup, and after a failed key fetch the API answers 503 (with `Retry-After`) for 30 s without trying again. Keys already cached keep working | The key fetch is a blocking call with a 5 s timeout. On the event loop it would stall every request, `/health` included, and during an outage each sign-in check would hold a worker for the full timeout |
+| 32 | Threats live inside their threat model's item, not as items of their own | Every change touches the whole model anyway (re-drafting swaps a set of threats at once), and one item makes every change atomic. 100 threats of maximum length in 4-byte characters would pass DynamoDB's 400 KB limit, so a save over 350 KB is refused with `409 too_large`, never truncated |
+| 33 | Optimistic locking: every save says which version it read, and fails if another save came first. The store then re-reads, applies the change again (re-checking duplicates and caps) and tries up to 3 times, then answers `409 edit_conflict` | Lambda runs many copies of the API at once. Without a version check, two edits at the same moment would silently drop one |
+| 34 | Per-user caps are enforced in a transaction with the write (a counter item with a condition), not by counting first | Count-then-write lets two creates at the same moment both pass the check |
+| 35 | The draft guard is a lease on the model item (conditional update, 6 minutes, released only by its own holder), replacing the per-process set from Day 10 | It holds across API instances, and if a process dies mid-draft the lease runs out instead of locking the model forever |
+| 36 | The in-memory store keeps a global cap (500 items) and is refused in prod. DynamoDB has no global cap; per-user caps plus admin-created accounts (Day 16) bound the total | Answers the #18 review: with a global cap of 500 and 50 per user, ten throwaway accounts would block everyone else. A global counter item would also be a single hot key |
+| 37 | Store calls are blocking (boto3), so routes that touch the store are plain `def` (threadpool) and the async draft route sends its store calls to the threadpool | Same reason as decision 31: a blocking call on the event loop stalls every request |
+| 38 | DynamoDB throttling and outages are `503 storage_busy` / `storage_unavailable` with `Retry-After`. A stored item that fails validation is a 500 and is logged by key only, never served half-read. Other DynamoDB errors (missing table, no permission) are not dressed up as a 503 | Busy is the client's to retry. A broken item or wrong IAM policy is ours to fix, and should be loud |
 
 ## Threat model of ThreatLens (STRIDE)
 
@@ -139,8 +156,9 @@ Trust boundaries: browser ↔ API Gateway, API ↔ outside APIs (OSV, EPSS, KEV,
 | **Spoofing** | The sign-in callback is used to log a victim into the attacker's account (login CSRF), or `?next=` sends them to a look-alike site | One-time `state` per tab, checked before the code is exchanged, and PKCE. `next` accepts same-site paths only (decision 29) |
 | **Tampering** | A crafted SBOM/lockfile exploits the parser (huge file, deep nesting, zip bomb) | Size limit on the presigned upload, strict parsers with depth limits, the worker has no network access except the allow-listed APIs |
 | **Tampering** | Prompt injection in the architecture text changes the LLM's output | The text is wrapped in `<architecture>` tags (a closing tag inside it is defanged) and the system prompt says it's data, not instructions. The output must match a fixed schema and is validated again on our side. It's shown as a draft only and never executed or used to call tools. Injection can still bend *what* the draft says, which is why a person accepts each threat |
+| **Tampering** | Two edits at the same moment, from two tabs or two Lambda copies, silently overwrite each other | Version check on every save, re-applied on a clash (decision 33). Tested with forced clashes and with parallel threads against DynamoDB Local in CI |
 | **Repudiation** | A user denies accepting or rejecting a threat | Every accept/reject is stored with the user id and a timestamp. API calls are logged to CloudWatch |
-| **Information disclosure** | One user reads another's projects (IDOR) | Partition key includes the user id, and tests check that cross-user reads return 404 |
+| **Information disclosure** | One user reads another's projects (IDOR) | The partition key is the user's `sub` from a verified token, so a request can't name another user's item; a `sub` can't contain `#`, so keys can't be forged. Tests check cross-user reads, leases and lists against both stores |
 | **Information disclosure** | The LLM API key leaks | Kept in Secrets Manager, read at runtime by the API role only. Gitleaks in CI and push protection on the repo |
 | **Information disclosure** | Uploaded SBOMs are publicly readable | Private bucket, block public access, KMS encryption, presigned URLs that expire in minutes |
 | **Denial of service** | Huge scans or many scans run up the AWS bill | API Gateway throttling, per-user scan limit, SQS batch size limit, AWS budget alarm |
