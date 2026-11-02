@@ -22,6 +22,7 @@ from threatlens_api.repository import (
     MemoryRepository,
     create_table,
 )
+from threatlens_api.scans import Scan
 from threatlens_api.settings import Settings
 from threatlens_api.store import ProjectStore, ThreatModelStore, WriteBudget, write_units
 from threatlens_api.threats import (
@@ -597,3 +598,49 @@ def test_edit_loop_on_a_big_model_hits_the_limit(app, client):
     assert int(r.headers["retry-after"]) > 0
     # Projects share the same budget, so switching between them doesn't double it.
     assert app.state.projects.budget is app.state.threat_models.budget
+
+
+# --- scans ---------------------------------------------------------------------------------
+
+
+def make_scan(project_id, owner="alice"):
+    return Scan(project_id=project_id, owner_id=owner, filename="r.txt", format="requirements")
+
+
+def test_scan_round_trip_versions_and_isolation(repo):
+    project = Project(name="p", owner_id="alice")
+    repo.create_project("alice", project, max_per_user=5)
+    scan = make_scan(project.id)
+    repo.create_scan(scan)
+    loaded, version = repo.load_scan("alice", project.id, scan.id)
+    assert (loaded, version) == (scan, 1)
+    assert repo.load_scan("bob", project.id, scan.id) is None
+    assert repo.load_scan("alice", uuid4(), scan.id) is None  # under another project
+
+    loaded.attempts = 1
+    repo.save_scan(loaded, 1)
+    with pytest.raises(Conflict):
+        repo.save_scan(loaded, 1)
+
+
+def test_latest_scan_only_moves_forward_and_needs_the_project(repo):
+    project = Project(name="p", owner_id="alice")
+    repo.create_project("alice", project, max_per_user=5)
+    old, new = make_scan(project.id), make_scan(project.id)
+    old.finished_at = datetime(2026, 11, 3, 10, tzinfo=UTC)
+    new.finished_at = datetime(2026, 11, 3, 11, tzinfo=UTC)
+
+    assert repo.latest_scan("alice", project.id) is None
+    repo.set_latest_scan(new)
+    repo.set_latest_scan(old)  # finished earlier: ignored
+    assert repo.latest_scan("alice", project.id) == new.id
+    assert repo.latest_scan("bob", project.id) is None
+
+    # A scan for a project that doesn't exist must not create one.
+    orphan = make_scan(uuid4())
+    orphan.finished_at = new.finished_at
+    repo.set_latest_scan(orphan)
+    assert repo.get_project("alice", orphan.project_id) is None
+    assert repo.latest_scan("alice", orphan.project_id) is None
+    # And the project itself still reads back fine with the pointer on it.
+    assert repo.get_project("alice", project.id) == project

@@ -3,7 +3,8 @@ from uuid import UUID
 
 import pytest
 
-from threatlens_api.drafting import DraftBudget, DraftError, DraftResult
+from threatlens_api.drafting import DraftError, DraftResult
+from threatlens_api.limits import HourlyBudget
 from threatlens_api.main import make_drafter
 from threatlens_api.settings import Settings
 from threatlens_api.threats import ThreatDraft
@@ -150,7 +151,7 @@ def test_draft_failures_leave_the_model_unchanged(app, client, new_model, kind, 
 
 def test_draft_limit(app, client, new_model):
     fake = use(app, [draft()], [draft()])
-    app.state.draft_budget = DraftBudget(1)
+    app.state.draft_budget = HourlyBudget(1)
     model_id = new_model()
     assert client.post(f"/threat-models/{model_id}/draft").status_code == 200
     r = client.post(f"/threat-models/{model_id}/draft")
@@ -162,7 +163,7 @@ def test_draft_limit(app, client, new_model):
 
 def test_draft_on_missing_model_costs_nothing(app, client):
     fake = use(app, [draft()])
-    app.state.draft_budget = DraftBudget(1)
+    app.state.draft_budget = HourlyBudget(1)
     assert client.post(f"/threat-models/{MISSING}/draft").status_code == 404
     assert fake.calls == []
     assert app.state.draft_budget.take() is None

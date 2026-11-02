@@ -9,6 +9,9 @@ DynamoDB layout, one table:
     USER#<sub>       TM#<id>         a threat model, threats included, as JSON
     USER#<sub>       PROJECT#<id>    a project, as JSON
     USER#<sub>       COUNTS          how many of each the user has, for the caps
+    USER#<sub>       SCAN#<p>#<id>   a scan's status and counts (its files are in S3)
+
+A project item also carries `latest_scan`, the newest finished scan, outside its body.
 
 A `sub` can't contain `#` (auth.py checks its characters), so keys can't be forged by
 picking a clever username.
@@ -30,6 +33,7 @@ from pydantic import ValidationError
 
 from threatlens_api.errors import ApiError
 from threatlens_api.models import Project
+from threatlens_api.scans import Scan
 from threatlens_api.threats import ThreatModel
 
 # DynamoDB's item limit is 400 KB including attribute names; leave room for those.
@@ -53,6 +57,11 @@ class Repository(Protocol):
     def create_project(self, owner: str, project: Project, max_per_user: int) -> None: ...
     def list_projects(self, owner: str) -> list[Project]: ...
     def get_project(self, owner: str, project_id: UUID) -> Project | None: ...
+    def create_scan(self, scan: Scan) -> None: ...
+    def load_scan(self, owner: str, project_id: UUID, scan_id: UUID) -> tuple[Scan, int] | None: ...
+    def save_scan(self, scan: Scan, version: int) -> None: ...
+    def set_latest_scan(self, scan: Scan) -> None: ...
+    def latest_scan(self, owner: str, project_id: UUID) -> UUID | None: ...
 
 
 # Counter name -> (error code, words). The codes are the ones the web app already knows.
@@ -95,6 +104,16 @@ def _parse_project(owner: str, project_id: UUID, body: str) -> Project:
     return project
 
 
+def _parse_scan(owner: str, scan_id: UUID, body: str) -> Scan:
+    try:
+        scan = Scan.model_validate({**json.loads(body), "owner_id": owner})
+    except (ValueError, ValidationError) as e:
+        raise _corrupt("scan", scan_id) from e
+    if scan.id != scan_id:
+        raise _corrupt("scan", scan_id)
+    return scan
+
+
 def _corrupt(what: str, item_id: UUID) -> RuntimeError:
     # Fail closed: a stored item that doesn't validate is never served half-read.
     log.error("stored item failed validation", extra={"kind": what, "item_id": str(item_id)})
@@ -115,6 +134,8 @@ class MemoryRepository:
         self._models: dict[tuple[str, UUID], tuple[str, int]] = {}
         self._projects: dict[tuple[str, UUID], str] = {}
         self._leases: dict[tuple[str, UUID], tuple[float, str]] = {}
+        self._scans: dict[tuple[str, UUID, UUID], tuple[str, int]] = {}
+        self._latest: dict[tuple[str, UUID], tuple[float, UUID]] = {}
 
     def _check_room(self, owner: str, what: str, items: dict, max_per_user: int) -> None:
         if sum(key[0] == owner for key in items) >= max_per_user:
@@ -176,6 +197,40 @@ class MemoryRepository:
         with self._lock:
             body = self._projects.get((owner, project_id))
         return None if body is None else _parse_project(owner, project_id, body)
+
+    def create_scan(self, scan: Scan) -> None:
+        body = _body(scan)
+        with self._lock:
+            if len(self._scans) >= self.max_items * 10:
+                raise ApiError(507, "storage_full", "No room for more scans on this server")
+            self._scans[(scan.owner_id, scan.project_id, scan.id)] = (body, 1)
+
+    def load_scan(self, owner: str, project_id: UUID, scan_id: UUID) -> tuple[Scan, int] | None:
+        with self._lock:
+            stored = self._scans.get((owner, project_id, scan_id))
+        return None if stored is None else (_parse_scan(owner, scan_id, stored[0]), stored[1])
+
+    def save_scan(self, scan: Scan, version: int) -> None:
+        body = _body(scan)
+        key = (scan.owner_id, scan.project_id, scan.id)
+        with self._lock:
+            stored = self._scans.get(key)
+            if stored is None or stored[1] != version:
+                raise Conflict
+            self._scans[key] = (body, version + 1)
+
+    def set_latest_scan(self, scan: Scan) -> None:
+        at = scan.finished_at.timestamp()
+        key = (scan.owner_id, scan.project_id)
+        with self._lock:
+            # Only ever forward: a slow old scan finishing late doesn't replace a newer one.
+            if key in self._projects and (key not in self._latest or self._latest[key][0] < at):
+                self._latest[key] = (at, scan.id)
+
+    def latest_scan(self, owner: str, project_id: UUID) -> UUID | None:
+        with self._lock:
+            found = self._latest.get((owner, project_id))
+        return None if found is None else found[1]
 
 
 # --- DynamoDB --------------------------------------------------------------------
@@ -402,3 +457,72 @@ class DynamoRepository:
             "get_item", Key=self._key(owner, f"PROJECT#{project_id}"), ConsistentRead=True
         ).get("Item")
         return None if item is None else _parse_project(owner, project_id, item["body"]["S"])
+
+    def create_scan(self, scan: Scan) -> None:
+        self._call(
+            "put_item",
+            Item={
+                **self._key(scan.owner_id, f"SCAN#{scan.project_id}#{scan.id}"),
+                "body": _s(_body(scan)),
+                "ver": _n(1),
+            },
+            ConditionExpression="attribute_not_exists(pk)",
+        )
+
+    def load_scan(self, owner: str, project_id: UUID, scan_id: UUID) -> tuple[Scan, int] | None:
+        item = self._call(
+            "get_item", Key=self._key(owner, f"SCAN#{project_id}#{scan_id}"), ConsistentRead=True
+        ).get("Item")
+        if item is None:
+            return None
+        return _parse_scan(owner, scan_id, item["body"]["S"]), int(item["ver"]["N"])
+
+    def save_scan(self, scan: Scan, version: int) -> None:
+        try:
+            self._call(
+                "update_item",
+                Key=self._key(scan.owner_id, f"SCAN#{scan.project_id}#{scan.id}"),
+                UpdateExpression="SET #b = :body, #v = :next",
+                ConditionExpression="#v = :ver",
+                ExpressionAttributeNames={"#b": "body", "#v": "ver"},
+                ExpressionAttributeValues={
+                    ":body": _s(_body(scan)),
+                    ":ver": _n(version),
+                    ":next": _n(version + 1),
+                },
+            )
+        except ClientError as e:
+            if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+                raise Conflict from e
+            raise
+
+    def set_latest_scan(self, scan: Scan) -> None:
+        try:
+            self._call(
+                "update_item",
+                Key=self._key(scan.owner_id, f"PROJECT#{scan.project_id}"),
+                UpdateExpression="SET #id = :id, #at = :at",
+                # Only ever forward: a slow old scan finishing late doesn't replace a newer one.
+                ConditionExpression="attribute_exists(pk) AND "
+                "(attribute_not_exists(#at) OR #at < :at)",
+                ExpressionAttributeNames={"#id": "latest_scan", "#at": "latest_scan_at"},
+                ExpressionAttributeValues={
+                    ":id": _s(str(scan.id)),
+                    ":at": _n(scan.finished_at.timestamp()),
+                },
+            )
+        except ClientError as e:
+            if e.response["Error"]["Code"] != "ConditionalCheckFailedException":
+                raise
+
+    def latest_scan(self, owner: str, project_id: UUID) -> UUID | None:
+        item = self._call(
+            "get_item",
+            Key=self._key(owner, f"PROJECT#{project_id}"),
+            ConsistentRead=True,
+            ProjectionExpression="#id",
+            ExpressionAttributeNames={"#id": "latest_scan"},
+        ).get("Item")
+        if not item or "latest_scan" not in item:
+            return None
+        return UUID(item["latest_scan"]["S"])
