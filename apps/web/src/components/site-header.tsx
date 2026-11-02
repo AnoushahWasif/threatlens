@@ -9,9 +9,12 @@ export function SiteHeader() {
           <ShieldCheck className="size-5" aria-hidden="true" />
           ThreatLens
         </Link>
-        <nav aria-label="Main" className="text-sm">
+        <nav aria-label="Main" className="flex gap-4 text-sm">
           <Link href="/" className="text-foreground">
             Projects
+          </Link>
+          <Link href="/threat-model" className="text-foreground">
+            Threat model
           </Link>
         </nav>
       </div>

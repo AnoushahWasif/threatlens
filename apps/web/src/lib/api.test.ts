@@ -1,6 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { ApiError, fetchFindings, fetchProjects, MAX_RESPONSE_BYTES, TIMEOUT_MS } from "@/lib/api";
+import {
+  ApiError,
+  fetchFindings,
+  fetchProjects,
+  MAX_RESPONSE_BYTES,
+  threatModelBackend,
+  TIMEOUT_MS,
+} from "@/lib/api";
 import { SAMPLE_FINDINGS } from "@/lib/findings";
 import { MAX_PROJECTS, SAMPLE_PROJECTS } from "@/lib/projects";
 
@@ -181,5 +188,113 @@ describe("fetchFindings", () => {
     const bad = [{ ...SAMPLE_FINDINGS[0], vuln_id: "javascript:alert(1)" }];
     const error = await failure(fetchFindings(OTHER_ID, { baseUrl: BASE, fetchImpl: respond(bad) }));
     expect(error.kind).toBe("invalid");
+  });
+});
+
+describe("threatModelBackend", () => {
+  const MODEL_ID = "5d2c8b1e-7a4f-4c3d-9e6b-1f0a2d3c4b5e";
+  const THREAT_ID = "00000000-0000-4000-8000-000000000001";
+  const THREAT = {
+    id: THREAT_ID,
+    category: "spoofing",
+    title: "Forged token",
+    description: "Replay a stolen token.",
+    mitigation: "",
+    component: "API",
+    status: "draft",
+    source: "llm",
+    edited: false,
+    created_at: "2026-10-31T09:00:00.123456Z",
+    updated_at: "2026-10-31T09:00:00.123456Z",
+  };
+  const MODEL = {
+    id: MODEL_ID,
+    name: "payments",
+    architecture: "A FastAPI app behind an ALB talks to Stripe and Postgres.",
+    threats: [THREAT],
+    drafted_with: null,
+    drafted_at: null,
+    created_at: "2026-10-31T08:00:00Z",
+  };
+  const api = (fetchImpl: typeof fetch) => threatModelBackend({ baseUrl: BASE, fetchImpl });
+  const errorBody = (code: string) => ({ error: { code, message: "server detail", request_id: "abc" } });
+
+  it("uses the in-memory sample backend when no API is configured", () => {
+    expect(threatModelBackend({ baseUrl: null }).source).toBe("sample");
+  });
+
+  it("creates with a JSON POST, no cookies, no redirects", async () => {
+    const fetchImpl = respond(MODEL, { status: 201 });
+    const model = await api(fetchImpl).create({ name: "payments", architecture: MODEL.architecture });
+    expect(model.id).toBe(MODEL_ID);
+    const [url, init] = fetchImpl.mock.calls[0];
+    expect(url).toBe(`${BASE}/threat-models`);
+    expect(init).toMatchObject({ method: "POST", credentials: "omit", redirect: "error" });
+    expect(init?.headers).toMatchObject({ "content-type": "application/json" });
+    expect(JSON.parse(String(init?.body))).toEqual({ name: "payments", architecture: MODEL.architecture });
+  });
+
+  it("sends PATCH with only the fields given, to the threat's path", async () => {
+    const fetchImpl = respond({ ...THREAT, status: "accepted" });
+    const threat = await api(fetchImpl).updateThreat(MODEL_ID, THREAT_ID, { status: "accepted" });
+    expect(threat.status).toBe("accepted");
+    const [url, init] = fetchImpl.mock.calls[0];
+    expect(url).toBe(`${BASE}/threat-models/${MODEL_ID}/threats/${THREAT_ID}`);
+    expect(init?.method).toBe("PATCH");
+    expect(JSON.parse(String(init?.body))).toEqual({ status: "accepted" });
+  });
+
+  it("accepts a 204 with no body for DELETE", async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 204 }));
+    await expect(api(fetchImpl).deleteThreat(MODEL_ID, THREAT_ID)).resolves.toBeUndefined();
+    expect(fetchImpl.mock.calls[0][1]).toMatchObject({ method: "DELETE" });
+  });
+
+  it("POSTs to /draft with no body", async () => {
+    const fetchImpl = respond(MODEL);
+    await api(fetchImpl).draft(MODEL_ID);
+    const [url, init] = fetchImpl.mock.calls[0];
+    expect(url).toBe(`${BASE}/threat-models/${MODEL_ID}/draft`);
+    expect(init).toMatchObject({ method: "POST", body: undefined });
+    expect(init?.headers).not.toHaveProperty("content-type");
+  });
+
+  it.each(["../../admin", "", "5d2c8b1e-7a4f-4c3d-9e6b-1f0a2d3c4b5e/../x"])(
+    "refuses id %j without a request",
+    async (id) => {
+      const fetchImpl = vi.fn<typeof fetch>();
+      const error = await failure(api(fetchImpl).get(id));
+      expect(error.kind).toBe("not-found");
+      expect(fetchImpl).not.toHaveBeenCalled();
+    },
+  );
+
+  it("turns 404 into not-found", async () => {
+    const error = await failure(api(respond(errorBody("not_found"), { status: 404 })).get(MODEL_ID));
+    expect(error.kind).toBe("not-found");
+  });
+
+  it("keeps a known error code and a capped Retry-After, never the server's message", async () => {
+    const fetchImpl = respond(errorBody("draft_limit"), { status: 429, headers: { "retry-after": "99999" } });
+    const error = await failure(api(fetchImpl).draft(MODEL_ID));
+    expect(error).toMatchObject({ kind: "http", status: 429, code: "draft_limit", retryAfter: 3600 });
+    expect(error.message).not.toContain("server detail");
+  });
+
+  it.each([
+    ["an unknown code", errorBody("drop_tables"), {}],
+    ["a non-JSON body", "<html>bad gateway</html>", {}],
+    ["an oversized body", errorBody("x".repeat(5_000)), {}],
+    ["a bad Retry-After", errorBody("llm_busy"), { "retry-after": "soon" }],
+  ])("copes with %s", async (_name, body, headers) => {
+    const error = await failure(api(respond(body, { status: 503, headers })).draft(MODEL_ID));
+    expect(error.kind).toBe("http");
+    expect(error.retryAfter).toBeUndefined();
+    if (_name !== "a bad Retry-After") expect(error.code).toBeUndefined();
+  });
+
+  it("rejects a threat model that doesn't match the schema", async () => {
+    const bad = { ...MODEL, threats: [{ ...THREAT, category: "phishing" }] };
+    expect((await failure(api(respond(bad)).get(MODEL_ID))).kind).toBe("invalid");
   });
 });
