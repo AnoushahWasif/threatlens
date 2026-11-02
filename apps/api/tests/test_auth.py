@@ -1,16 +1,18 @@
+import asyncio
 import base64
 import hashlib
 import hmac
 import json
 import time
 
+import httpx
 import jwt
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
 
-from threatlens_api.auth import LOCAL_ISSUER
+from threatlens_api.auth import LOCAL_ISSUER, JwksKeys
 from threatlens_api.drafting import DraftBudget, DraftResult
 from threatlens_api.main import create_app
 from threatlens_api.settings import Settings
@@ -299,7 +301,8 @@ def cognito(monkeypatch, pool_key):
         calls.append(1)
         return jwks
 
-    monkeypatch.setattr(app.state.verifier.keys._client, "fetch_data", fetch)
+    # Patched on the base class, so the fail-fast wrapper in auth.py still runs.
+    monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda self: fetch())
     return TestClient(app, raise_server_exceptions=False), calls
 
 
@@ -351,7 +354,165 @@ def test_cognito_keys_unreachable_is_503_not_401(monkeypatch, pool_key):
     def down():
         raise jwt.PyJWKClientConnectionError("timed out")
 
-    monkeypatch.setattr(app.state.verifier.keys._client, "fetch_data", down)
+    monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda self: down())
     client = TestClient(app, raise_server_exceptions=False)
     r = client.post("/threat-models", json=MODEL, headers=bearer(cognito_token(pool_key)))
     assert (r.status_code, error_code(r)) == (503, "auth_unavailable")
+    assert r.headers["retry-after"] == "30"
+
+
+def pool_jwks(*keys):
+    out = []
+    for kid, key in keys:
+        jwk = jwt.algorithms.RSAAlgorithm.to_jwk(key.public_key(), as_dict=True)
+        out.append({**jwk, "kid": kid, "alg": "RS256", "use": "sig"})
+    return {"keys": out}
+
+
+class FakeClock:
+    def __init__(self):
+        self.now = 1_000.0
+
+    def __call__(self):
+        return self.now
+
+
+def cognito_app(monkeypatch, fetch, clock=None):
+    """A Cognito-mode app whose JWKS fetch is `fetch`, with an optional fake clock."""
+    app = create_app(cognito_settings())
+    if clock is not None:
+        app.state.verifier.keys = JwksKeys(f"{ISSUER}/.well-known/jwks.json", clock=clock)
+    monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda self: fetch())
+    return app
+
+
+def test_cognito_outage_fails_fast_then_retries(monkeypatch, pool_key):
+    clock, calls, up = FakeClock(), [], [False]
+
+    def fetch():
+        calls.append(clock.now)
+        if not up[0]:
+            raise jwt.PyJWKClientConnectionError("timed out")
+        return pool_jwks(("pool-key-1", pool_key))
+
+    client = TestClient(cognito_app(monkeypatch, fetch, clock), raise_server_exceptions=False)
+
+    def post():
+        return client.post("/threat-models", json=MODEL, headers=bearer(cognito_token(pool_key)))
+
+    assert post().status_code == 503
+    clock.now += 10
+    r = post()
+    # No second network call inside the window, and Retry-After counts down.
+    assert (r.status_code, r.headers["retry-after"], len(calls)) == (503, "20", 1)
+
+    clock.now += 21
+    up[0] = True
+    assert post().status_code == 201
+    assert len(calls) == 2
+
+
+def test_cached_keys_keep_working_during_an_outage(monkeypatch, pool_key):
+    clock, up = FakeClock(), [True]
+    new_key = rsa.generate_private_key(public_exponent=65_537, key_size=2_048)
+
+    def fetch():
+        if not up[0]:
+            raise jwt.PyJWKClientConnectionError("timed out")
+        return pool_jwks(("pool-key-1", pool_key))
+
+    client = TestClient(cognito_app(monkeypatch, fetch, clock), raise_server_exceptions=False)
+    headers = bearer(cognito_token(pool_key))
+    assert client.post("/threat-models", json=MODEL, headers=headers).status_code == 201
+
+    # Cognito goes down and a token signed with a key we haven't seen arrives: that one
+    # can't be checked, but the key we already have still works.
+    up[0] = False
+    rotated = bearer(cognito_token(new_key, kid="pool-key-2"))
+    assert client.post("/threat-models", json=MODEL, headers=rotated).status_code == 503
+    assert client.post("/threat-models", json=MODEL, headers=headers).status_code == 201
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        json.JSONDecodeError("Expecting value", "<html>", 0),
+        jwt.PyJWKClientError("The JWKS endpoint did not return a JSON object"),
+        {"keys": []},
+        {"keys": [{"kty": "RSA", "kid": "pool-key-1"}]},
+    ],
+    ids=["not-json", "not-an-object", "no-keys", "broken-key"],
+)
+def test_garbled_key_set_is_503_not_401_or_500(monkeypatch, pool_key, reply):
+    def fetch():
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+    client = TestClient(cognito_app(monkeypatch, fetch), raise_server_exceptions=False)
+    r = client.post("/threat-models", json=MODEL, headers=bearer(cognito_token(pool_key)))
+    assert (r.status_code, error_code(r)) == (503, "auth_unavailable")
+
+
+def test_keys_are_fetched_at_startup(monkeypatch, pool_key):
+    calls = []
+
+    def fetch():
+        calls.append(1)
+        return pool_jwks(("pool-key-1", pool_key))
+
+    with TestClient(cognito_app(monkeypatch, fetch)) as client:
+        assert len(calls) == 1
+        r = client.post("/threat-models", json=MODEL, headers=bearer(cognito_token(pool_key)))
+        assert r.status_code == 201
+    assert len(calls) == 1
+
+
+def test_startup_survives_cognito_being_down(monkeypatch, caplog):
+    def fetch():
+        raise jwt.PyJWKClientConnectionError("timed out")
+
+    with TestClient(cognito_app(monkeypatch, fetch), raise_server_exceptions=False) as client:
+        assert client.get("/health").status_code == 200
+    assert "couldn't fetch Cognito signing keys" in caplog.text
+
+
+def test_local_mode_starts_without_fetching_anything(monkeypatch):
+    def fetch():
+        raise AssertionError("local mode must not fetch keys")
+
+    monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda self: fetch())
+    with TestClient(create_app(Settings(environment="test", _env_file=None))) as client:
+        assert client.get("/health").status_code == 200
+
+
+def test_a_slow_key_fetch_doesnt_block_other_requests(monkeypatch, pool_key):
+    """The fetch is blocking. Run on the event loop, it would stall /health too."""
+
+    def slow_fetch():
+        time.sleep(1.0)
+        return pool_jwks(("pool-key-1", pool_key))
+
+    app = cognito_app(monkeypatch, slow_fetch)
+
+    async def timed(start, call):
+        r = await call
+        return r.status_code, time.perf_counter() - start
+
+    async def run():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+            start = time.perf_counter()
+            create = asyncio.create_task(
+                timed(
+                    start,
+                    ac.post("/threat-models", json=MODEL, headers=bearer(cognito_token(pool_key))),
+                )
+            )
+            await asyncio.sleep(0.1)  # let the slow request start first
+            health = await timed(start, ac.get("/health"))
+            return health, await create
+
+    (health_status, health_done), (create_status, create_done) = asyncio.run(run())
+    assert (health_status, create_status) == (200, 201)
+    assert health_done < 0.6 < create_done

@@ -1,7 +1,9 @@
 import logging
 import uuid
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -35,7 +37,15 @@ def error(status: int, code: str, message: str, request_id: str, details=None) -
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        if isinstance(app.state.verifier.keys, JwksKeys):
+            await run_in_threadpool(app.state.verifier.keys.warm)
+        yield
+
     app = FastAPI(
+        lifespan=lifespan,
         title="ThreatLens API",
         version=__version__,
         # Don't publish the API map in prod.

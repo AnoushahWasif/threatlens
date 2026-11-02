@@ -127,6 +127,7 @@ The first idea was `EPSS × weight × (2 if in KEV)`. On real numbers that left 
 | 28 | A threat model belongs to one user. Someone else's model gets the same 404 as a missing one. Caps per user (50 models, 5 drafts an hour) as well as overall | No id probing. One account can't fill the store or spend everyone's drafts |
 | 29 | Web sign-in: Cognito hosted UI with authorization code + PKCE (no client secret), one-time `state` checked and deleted on return, code removed from the address bar. Only the access token is kept, in `sessionStorage`; ID and refresh tokens are dropped. `?next=` must be a same-site path | A static site can't keep an httpOnly cookie, so the token is readable by script and the strict CSP (decision 14) is the XSS defence. Tab-only storage and no refresh token cap a stolen token at its one-hour life. A checked `next` stops open redirects |
 | 30 | Sign-in is skipped when no API is configured | The app then shows only labelled sample data, and there's nothing to protect |
+| 31 | Tokens are checked in the threadpool, Cognito's keys are fetched at startup, and after a failed key fetch the API answers 503 (with `Retry-After`) for 30 s without trying again. Keys already cached keep working | The key fetch is a blocking call with a 5 s timeout. On the event loop it would stall every request, `/health` included, and during an outage each sign-in check would hold a worker for the full timeout |
 
 ## Threat model of ThreatLens (STRIDE)
 
@@ -144,5 +145,6 @@ Trust boundaries: browser ↔ API Gateway, API ↔ outside APIs (OSV, EPSS, KEV,
 | **Information disclosure** | Uploaded SBOMs are publicly readable | Private bucket, block public access, KMS encryption, presigned URLs that expire in minutes |
 | **Denial of service** | Huge scans or many scans run up the AWS bill | API Gateway throttling, per-user scan limit, SQS batch size limit, AWS budget alarm |
 | **Denial of service** | Repeated drafting runs up the LLM bill | Drafting off by default, 20 drafts per hour cap, architecture text capped at 8,000 characters, `max_tokens` set, provider spend limit on the key |
+| **Denial of service** | Cognito's key endpoint is slow or down, and every request waits on it | Key fetch off the event loop, warmed at startup, and a 30 s fail-fast window after a failure (decision 31). Signed-in users with a cached key aren't affected |
 | **Denial of service** | OSV/EPSS rate-limit or go down | Cache responses in DynamoDB with a TTL, back off and retry, and mark the scan "partial" instead of failing |
 | **Elevation of privilege** | A compromised Lambda reaches other AWS resources | One IAM role per function, least privilege (the worker can't read secrets, the API can't read the queue) |

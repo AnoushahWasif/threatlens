@@ -5,9 +5,13 @@ Development uses a local stand-in issuer with a key that exists only in this pro
 the API runs the same checks in both places.
 """
 
+import json
+import logging
+import math
 import re
 import secrets
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Annotated, Protocol
 
@@ -24,7 +28,10 @@ LEEWAY_SECONDS = 30
 MAX_TOKEN_LENGTH = 8_192
 LOCAL_ISSUER = "threatlens-local"
 LOCAL_TOKEN_SECONDS = 3_600
+JWKS_RETRY_SECONDS = 30
 _SUBJECT = re.compile(r"^[A-Za-z0-9._:@-]{1,128}$")
+
+log = logging.getLogger("threatlens")
 
 
 @dataclass(frozen=True)
@@ -47,19 +54,62 @@ class KeySource(Protocol):
     def signing_key(self, token: str): ...
 
 
-class JwksKeys:
-    """Cognito's public keys, fetched from the pool's JWKS URL and cached."""
+class _FailFastJWKClient(jwt.PyJWKClient):
+    """After a failed fetch, fails straight away for a while instead of waiting the full
+    timeout again on every request. Keys already cached keep working meanwhile."""
 
-    def __init__(self, url: str):
-        self._client = jwt.PyJWKClient(url, cache_keys=True, lifespan=3_600, timeout=5)
+    def __init__(self, url: str, clock: Callable[[], float]):
+        super().__init__(url, cache_keys=True, lifespan=3_600, timeout=5)
+        self._clock = clock
+        self.down_until = 0.0
+
+    def fetch_data(self):
+        if self._clock() < self.down_until:
+            raise jwt.PyJWKClientConnectionError("JWKS fetch failed recently")
+        try:
+            return super().fetch_data()
+        except (jwt.PyJWTError, json.JSONDecodeError) as e:
+            self.down_until = self._clock() + JWKS_RETRY_SECONDS
+            raise jwt.PyJWKClientConnectionError("JWKS fetch failed") from e
+
+
+class JwksKeys:
+    """Cognito's public keys, fetched from the pool's JWKS URL and cached.
+
+    The fetch is blocking, so callers must run it off the event loop.
+    """
+
+    def __init__(self, url: str, *, clock: Callable[[], float] = time.monotonic):
+        self._client = _FailFastJWKClient(url, clock)
+        self._clock = clock
 
     def signing_key(self, token: str):
         try:
             return self._client.get_signing_key_from_jwt(token).key
-        except jwt.PyJWKClientConnectionError as e:
-            raise ApiError(503, "auth_unavailable", "Can't check sign-ins right now") from e
+        # A garbled key set is Cognito's fault, not the token's, so it's a 503 too.
+        except (jwt.PyJWKClientConnectionError, jwt.PyJWKSetError) as e:
+            wait = max(self._client.down_until - self._clock(), 1)
+            raise _unavailable(wait) from e
         except (jwt.PyJWKClientError, jwt.DecodeError) as e:
             raise invalid_token() from e
+
+    def warm(self) -> bool:
+        """Fetches the keys at startup so the first sign-in doesn't wait. Never raises."""
+        try:
+            self._client.get_signing_keys()
+        except jwt.PyJWTError:
+            log.warning("couldn't fetch Cognito signing keys at startup; will retry on use")
+            return False
+        return True
+
+
+def _unavailable(wait: float) -> ApiError:
+    return ApiError(
+        503,
+        "auth_unavailable",
+        "Can't check sign-ins right now",
+        headers={"Retry-After": str(max(1, math.ceil(wait)))},
+    )
 
 
 class LocalIssuer:
@@ -132,7 +182,9 @@ class TokenVerifier:
         return User(id=sub, username=username)
 
 
-async def current_user(request: Request) -> User:
+# A plain def on purpose: FastAPI runs it in the threadpool, so a JWKS fetch on a cache
+# miss doesn't stall the event loop (and every other request with it).
+def current_user(request: Request) -> User:
     scheme, _, token = request.headers.get("authorization", "").partition(" ")
     token = token.strip()
     if scheme.lower() != "bearer" or not token:
