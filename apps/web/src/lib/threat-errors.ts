@@ -16,6 +16,10 @@ const BY_CODE: Partial<Record<ApiErrorCode, string>> = {
   storage_full: "The server has no room for more threat models.",
   validation_error: "The server didn't accept that. Check the fields and try again.",
   payload_too_large: "That's too much text for one request.",
+  edit_conflict: "This threat model was changed somewhere else at the same time. Reload and try again.",
+  too_large: "This threat model is too big to save. Shorten or remove some threats.",
+  storage_busy: "The server is busy. Try again in a moment.",
+  storage_unavailable: "The server can't reach its storage right now. Try again later.",
 };
 
 export function errorMessage(error: unknown): string {

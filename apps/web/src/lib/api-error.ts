@@ -29,6 +29,11 @@ export const KNOWN_CODES = [
   "llm_bad_output",
   "llm_busy",
   "llm_unavailable",
+  "edit_conflict",
+  "too_large",
+  "too_many_projects",
+  "storage_busy",
+  "storage_unavailable",
 ] as const;
 export type ApiErrorCode = (typeof KNOWN_CODES)[number];
 
