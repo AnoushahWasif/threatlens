@@ -10,6 +10,8 @@ const BY_CODE: Partial<Record<ApiErrorCode, string>> = {
   llm_busy: "The AI provider is busy. Try again in a minute.",
   llm_unavailable: "Couldn't reach the AI provider. Try again later.",
   too_many_threats: `This model already has the maximum of ${LIMITS.threats} threats. Delete some first.`,
+  duplicate_threat: "There's already a threat with this title in this category.",
+  draft_in_progress: "A draft for this model is already running. Wait for it to finish.",
   storage_full: "The server has no room for more threat models.",
   validation_error: "The server didn't accept that. Check the fields and try again.",
   payload_too_large: "That's too much text for one request.",

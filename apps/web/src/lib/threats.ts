@@ -60,7 +60,14 @@ export const threatModelSchema = z.object({
   created_at: timestamp,
 });
 
+export const draftResultSchema = z.object({
+  model: threatModelSchema,
+  added: z.number().int().min(0).max(LIMITS.threats),
+  dropped: z.number().int().min(0),
+});
+
 export type Threat = z.infer<typeof threatSchema>;
+export type DraftResult = z.infer<typeof draftResultSchema>;
 export type ThreatModel = z.infer<typeof threatModelSchema>;
 
 /** What a person types into the threat form; the API sets status, source and ids. */

@@ -72,9 +72,9 @@ export function useThreatModel(id: string) {
   // These throw ApiError; the caller shows errorMessage(error) next to what failed.
   const actions = {
     draft: async () => {
-      const model = await backend!.draft(id);
-      setModel(() => model);
-      return model;
+      const result = await backend!.draft(id);
+      setModel(() => result.model);
+      return result;
     },
     add: async (input: ThreatInput) => {
       const threat = await backend!.addThreat(id, input);

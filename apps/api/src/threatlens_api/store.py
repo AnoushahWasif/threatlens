@@ -74,6 +74,7 @@ class ThreatModelStore:
         model = self.get(model_id)
         if len(model.threats) >= self.max_threats:
             raise ApiError(409, "too_many_threats", f"A model can hold {self.max_threats} threats")
+        self._check_unique(model, draft)
         # Written by a person, so it needs no review.
         threat = Threat(
             **draft.model_dump(), status=ThreatStatus.ACCEPTED, source=ThreatSource.MANUAL
@@ -93,6 +94,7 @@ class ThreatModelStore:
         updated = Threat.model_validate(
             {**threat.model_dump(), **changes, "edited": edited, "updated_at": _now()}
         )
+        self._check_unique(model, updated, ignore=threat_id)
         model.threats[index] = updated
         return updated
 
@@ -100,6 +102,14 @@ class ThreatModelStore:
         model = self.get(model_id)
         index, _ = self._find(model, threat_id)
         del model.threats[index]
+
+    @staticmethod
+    def _check_unique(model: ThreatModel, threat: ThreatDraft, ignore: UUID | None = None) -> None:
+        # Drafting dedupes on the same key, so hand edits must too, or the export lists it twice.
+        if any(t.id != ignore and _key(t) == _key(threat) for t in model.threats):
+            raise ApiError(
+                409, "duplicate_threat", "A threat with this title is already in this category"
+            )
 
     @staticmethod
     def _find(model: ThreatModel, threat_id: UUID) -> tuple[int, Threat]:
