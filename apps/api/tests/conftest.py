@@ -28,5 +28,18 @@ def app(settings):
 
 
 @pytest.fixture
-def client(app):
+def token(app):
+    """Access tokens from the app's own local issuer: `token("bob")`."""
+    return app.state.local_issuer.issue
+
+
+@pytest.fixture
+def client(app, token):
+    # Signed in as alice by default; tests about auth itself use `anon`.
+    headers = {"Authorization": f"Bearer {token('alice')}"}
+    return TestClient(app, raise_server_exceptions=False, headers=headers)
+
+
+@pytest.fixture
+def anon(app):
     return TestClient(app, raise_server_exceptions=False)

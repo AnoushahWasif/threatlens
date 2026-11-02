@@ -80,6 +80,8 @@ class ThreatModelCreate(Strict):
 
 class ThreatModel(ThreatModelCreate):
     id: UUID = Field(default_factory=uuid4)
+    # The Cognito `sub` of whoever created it. Never sent back in responses.
+    owner_id: str = Field(min_length=1, max_length=128, exclude=True)
     threats: list[Threat] = Field(default_factory=list)
     drafted_with: str | None = None
     drafted_at: datetime | None = None

@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from threatlens_api import __version__
+from threatlens_api.auth import JwksKeys, LocalIssuer, TokenVerifier, dev_router
 from threatlens_api.drafting import ClaudeDrafter, DraftBudget, Drafter
 from threatlens_api.errors import ApiError
 from threatlens_api.routes_threats import router as threats_router
@@ -45,7 +46,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
     app.state.threat_models = ThreatModelStore()
     app.state.drafter = make_drafter(settings)
-    app.state.draft_budget = DraftBudget(settings.llm_drafts_per_hour)
+    app.state.draft_budget = DraftBudget(
+        settings.llm_drafts_per_hour, per_user=settings.llm_drafts_per_user_per_hour
+    )
+    app.state.local_issuer = None
+    if settings.auth_mode == "local":
+        app.state.local_issuer = LocalIssuer(settings.auth_client_id)
+        keys = app.state.local_issuer
+    else:
+        keys = JwksKeys(f"{settings.auth_issuer}/.well-known/jwks.json")
+    app.state.verifier = TokenVerifier(keys, settings.auth_issuer, settings.auth_client_id)
     app.state.drafts_in_progress = set()
 
     app.add_middleware(
@@ -101,6 +111,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"status": "ok", "version": __version__}
 
     app.include_router(threats_router)
+    if app.state.local_issuer is not None:
+        app.include_router(dev_router)
     return app
 
 
