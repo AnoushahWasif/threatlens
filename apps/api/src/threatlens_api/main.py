@@ -11,19 +11,18 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from threatlens_api import __version__
 from threatlens_api.auth import JwksKeys, LocalIssuer, TokenVerifier, dev_router
-from threatlens_api.drafting import ClaudeDrafter, DraftBudget, Drafter
+from threatlens_api.drafting import ClaudeDrafter, Drafter
 from threatlens_api.errors import ApiError
-from threatlens_api.repository import (
-    DynamoRepository,
-    MemoryRepository,
-    Repository,
-    create_table,
-    dynamodb_client,
-)
+from threatlens_api.limits import HourlyBudget
+from threatlens_api.repository import create_table
 from threatlens_api.routes_projects import router as projects_router
+from threatlens_api.routes_scans import router as scans_router
 from threatlens_api.routes_threats import router as threats_router
+from threatlens_api.scans import MemoryQueue
 from threatlens_api.settings import Settings, get_settings
 from threatlens_api.store import ProjectStore, ThreatModelStore, WriteBudget
+from threatlens_api.wiring import make_blobs, make_queue, make_repository
+from threatlens_api.worker import LocalRunner, Worker
 
 log = logging.getLogger("threatlens")
 
@@ -53,7 +52,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if settings.store == "dynamodb" and settings.dynamodb_endpoint_url:
             # DynamoDB Local starts empty. In AWS the table comes from Terraform.
             await run_in_threadpool(create_table, app.state.dynamodb, settings.dynamodb_table)
-        yield
+        if app.state.local_runner is not None:
+            app.state.local_runner.start()
+        try:
+            yield
+        finally:
+            if app.state.local_runner is not None:
+                app.state.local_runner.stop()
 
     app = FastAPI(
         lifespan=lifespan,
@@ -65,19 +70,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         openapi_url=None if settings.is_prod else "/openapi.json",
     )
     app.state.settings = settings
-    app.state.dynamodb = None
-    repo: Repository
-    if settings.store == "dynamodb":
-        app.state.dynamodb = dynamodb_client(settings.aws_region, settings.dynamodb_endpoint_url)
-        repo = DynamoRepository(app.state.dynamodb, settings.dynamodb_table)
-    else:
-        repo = MemoryRepository()
+    repo, app.state.dynamodb = make_repository(settings)
+    app.state.repo = repo
+    app.state.blobs = make_blobs(settings)
+    app.state.scan_queue = make_queue(settings)
+    app.state.scan_budget = HourlyBudget(
+        settings.scans_per_hour, per_user=settings.scans_per_user_per_hour
+    )
+    # With no SQS queue (local work), scans run in a thread inside this process.
+    app.state.local_runner = None
+    if isinstance(app.state.scan_queue, MemoryQueue):
+        app.state.local_runner = LocalRunner(app.state.scan_queue, Worker(repo, app.state.blobs))
     # One budget for both, so a user can't spend it twice by switching between them.
     writes = WriteBudget(settings.write_units_per_user_per_hour)
     app.state.threat_models = ThreatModelStore(repo, budget=writes)
     app.state.projects = ProjectStore(repo, budget=writes)
     app.state.drafter = make_drafter(settings)
-    app.state.draft_budget = DraftBudget(
+    app.state.draft_budget = HourlyBudget(
         settings.llm_drafts_per_hour, per_user=settings.llm_drafts_per_user_per_hour
     )
     app.state.local_issuer = None
@@ -142,6 +151,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.include_router(threats_router)
     app.include_router(projects_router)
+    app.include_router(scans_router)
     if app.state.local_issuer is not None:
         app.include_router(dev_router)
     return app

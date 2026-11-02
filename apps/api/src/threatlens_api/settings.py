@@ -36,6 +36,12 @@ class Settings(BaseSettings):
     dynamodb_table: str = Field(default="threatlens", pattern=r"^[A-Za-z0-9_.-]{3,255}$")
     # Only for DynamoDB Local. Unset in AWS, where boto3 picks the regional endpoint.
     dynamodb_endpoint_url: str | None = Field(default=None, pattern=r"^https?://[^\s/?#]+/?$")
+    # Unset: an in-process queue and files kept in memory, for local work. Prod needs both.
+    scan_queue_url: str | None = Field(default=None, pattern=r"^https://[^\s?#]+$")
+    uploads_bucket: str | None = Field(default=None, pattern=r"^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$")
+    # OSV, EPSS and KEV are free public services; don't let one account hammer them.
+    scans_per_hour: int = Field(default=200, ge=1, le=100_000)
+    scans_per_user_per_hour: int = Field(default=10, ge=1, le=10_000)
     aws_region: str = Field(default="eu-west-2", pattern=r"^[a-z]{2}(-[a-z]+)+-\d$")
 
     @model_validator(mode="after")
@@ -57,6 +63,8 @@ class Settings(BaseSettings):
             raise ValueError("THREATLENS_AUTH_MODE must be cognito in prod")
         if self.store != "dynamodb":
             raise ValueError("THREATLENS_STORE must be dynamodb in prod")
+        if self.scan_queue_url is None or self.uploads_bucket is None:
+            raise ValueError("THREATLENS_SCAN_QUEUE_URL and _UPLOADS_BUCKET must be set in prod")
         if self.dynamodb_endpoint_url is not None:
             raise ValueError("THREATLENS_DYNAMODB_ENDPOINT_URL is for DynamoDB Local, not prod")
         if "*" in self.cors_origins:

@@ -10,11 +10,11 @@ from threatlens_api.drafting import (
     MAX_DRAFT_THREATS,
     SYSTEM_PROMPT,
     ClaudeDrafter,
-    DraftBudget,
     DraftError,
     parse_drafts,
     user_message,
 )
+from threatlens_api.limits import HourlyBudget
 from threatlens_api.threats import Stride
 
 ARCH = "A Next.js web app calls a FastAPI API on Lambda, which stores projects in DynamoDB."
@@ -203,12 +203,12 @@ def test_network_error():
     assert e.value.kind == "upstream"
 
 
-# --- DraftBudget --------------------------------------------------------------
+# --- HourlyBudget --------------------------------------------------------------
 
 
 def test_budget_allows_up_to_the_limit_then_says_how_long_to_wait():
     clock = [1000.0]
-    budget = DraftBudget(2, now=lambda: clock[0])
+    budget = HourlyBudget(2, now=lambda: clock[0])
     assert budget.take() is None
     clock[0] += 600
     assert budget.take() is None

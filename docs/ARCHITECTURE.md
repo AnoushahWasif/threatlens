@@ -30,18 +30,18 @@ flowchart TB
         API[API Lambda<br/>FastAPI]
         Q[SQS scan queue]
         W[Worker Lambda<br/>ingest, OSV, EPSS, KEV, scoring]
-        DB[(DynamoDB<br/>projects, findings, threats)]
-        S3U[(S3<br/>uploaded SBOMs)]
+        DB[(DynamoDB<br/>projects, scans, threat models)]
+        S3U[(S3<br/>uploads, findings)]
         SM[Secrets Manager<br/>LLM API key]
     end
     WEB --> CF
     WEB -->|sign in| COG
     WEB -->|JWT| APIGW --> API
     API --> DB
-    API -->|presigned upload| S3U
+    API -->|upload| S3U
     API -->|enqueue scan| Q --> W
-    W --> S3U
-    W --> DB
+    W -->|read upload, write findings| S3U
+    W -->|scan status| DB
     API -->|threat-model draft| SM
 ```
 
@@ -63,6 +63,9 @@ Local development runs the API and worker as plain processes, with an in-memory 
 | `USER#<sub>` | `TM#<id>` | A threat model with its threats, as one JSON body, plus `ver` (version) and the draft lease (`draft_until`, `draft_lease`) |
 | `USER#<sub>` | `PROJECT#<id>` | A project, as JSON |
 | `USER#<sub>` | `COUNTS` | `threat_models` and `projects` counts, for the per-user caps |
+| `USER#<sub>` | `SCAN#<project>#<id>` | A scan's status and counts, as JSON with `ver`. Its upload and findings are files in S3 |
+
+A project item also carries `latest_scan` and `latest_scan_at` outside its body: the newest finished scan, which only ever moves forward.
 
 Access patterns: get one item by key (strongly consistent read), list a user's projects (Query on `pk` with `begins_with(sk, "PROJECT#")`, every page followed), create (transaction: counter below cap + put if new), change (update if `ver` still matches). Nothing scans the table. The owner's `sub` is never stored in a body; it's the key.
 
@@ -76,17 +79,19 @@ sequenceDiagram
     participant Q as SQS
     participant W as Worker
     participant D as DynamoDB
-    B->>A: create project
-    A-->>B: presigned upload URL
-    B->>S: upload SBOM / lockfile
-    B->>A: start scan
-    A->>Q: scan job
-    Q->>W: job
-    W->>S: read file
-    W->>W: parse to dependencies
+    B->>A: upload SBOM / lockfile (POST /projects/{id}/scans)
+    A->>A: parse it (bad file = 422 now)
+    A->>S: raw file
+    A->>D: scan "queued"
+    A->>Q: ids only
+    A-->>B: 202 + scan
+    Q->>W: message (at least once)
+    W->>D: claim: queued to running (versioned)
+    W->>S: read file, parse again
     W->>W: OSV, EPSS, KEV, score
-    W->>D: findings
-    B->>A: poll status / get findings
+    W->>S: findings JSON
+    W->>D: scan "done", project's latest_scan
+    B->>A: poll scan / get findings
 ```
 
 ## Risk score
@@ -146,6 +151,14 @@ The first idea was `EPSS × weight × (2 if in KEV)`. On real numbers that left 
 | 37 | Store calls are blocking (boto3), so routes that touch the store are plain `def` (threadpool) and the async draft route sends its store calls to the threadpool | Same reason as decision 31: a blocking call on the event loop stalls every request |
 | 38 | DynamoDB throttling and outages are `503 storage_busy` / `storage_unavailable` with `Retry-After`. A stored item that fails validation is a 500 and is logged by key only, never served half-read. Other DynamoDB errors (missing table, no permission) are not dressed up as a 503 | Busy is the client's to retry. A broken item or wrong IAM policy is ours to fix, and should be loud |
 | 39 | A per-user budget of 20,000 DynamoDB write units an hour (1 per KB of item written, failed conditional writes included) across threat models and projects. Over it: `429 write_limit` with `Retry-After` | Every threat edit rewrites the whole model, up to ~340 units. A script editing a big model in a loop would cost a few hundred dollars a day with no LLM call involved; a request count alone wouldn't bound that. The budget caps one account at about $0.60 a day per API copy. It's per process, so API Gateway throttling (Day 16) is the shared limit |
+| 40 | Findings are one JSON file per scan in S3, not DynamoDB items (changes the Day 1 plan) | Written once and read whole, and up to 20,000 per scan. As items, a big scan would cost thousands of write units; as one S3 object it's one PUT. Scan status stays in DynamoDB, where the versioned saves are |
+| 41 | The API parses the upload before queueing; the worker does the network part (OSV, EPSS, KEV) | A bad file is refused at once with `422 bad_file`, not minutes later. On a real 4-line file the upload answered in 0.22 s and the scan took 22 s |
+| 42 | Queue messages carry ids only (`owner`, `project_id`, `scan_id`); the worker reads everything else back by key | A message can't carry data of its own, and one naming another user's scan finds nothing, because the owner is the key |
+| 43 | The worker assumes at-least-once delivery: done/failed scans are skipped, the queued-to-running claim is a versioned save only one worker wins, a scan "running" for over 15 minutes is taken over, and 3 attempts then `failed` with a fixed message | SQS can deliver twice, and a Lambda can die mid-scan. The visibility timeout (Day 16) must be at least 15 minutes, or a live scan gets a twin. Crash details stay in the logs |
+| 44 | The worker Lambda reports failures per message (`batchItemFailures`) | One bad scan doesn't make the whole batch run again |
+| 45 | Without an SQS queue (local work) scans run in a thread inside the API; prod requires a queue URL and a bucket | No AWS needed to work on it, and prod can't fall back to the thread by accident |
+| 46 | 10 scans per user per hour, 200 for the whole API | OSV, EPSS and KEV are free public services; one account mustn't hammer them through us |
+| 47 | Uploads go through the API for now, capped at 1 MB and counted while reading (a chunked body has no Content-Length) | Simple until Terraform (Day 15–16). Then presigned S3 uploads, which also lift the size limit |
 
 ## Threat model of ThreatLens (STRIDE)
 
@@ -166,5 +179,7 @@ Trust boundaries: browser ↔ API Gateway, API ↔ outside APIs (OSV, EPSS, KEV,
 | **Denial of service** | Repeated drafting runs up the LLM bill | Drafting off by default, 20 drafts per hour cap, architecture text capped at 8,000 characters, `max_tokens` set, provider spend limit on the key |
 | **Denial of service** | Cognito's key endpoint is slow or down, and every request waits on it | Key fetch off the event loop, warmed at startup, and a 30 s fail-fast window after a failure (decision 31). Signed-in users with a cached key aren't affected |
 | **Denial of service** | A signed-in script edits a large threat model in a loop, and each edit rewrites up to 350 KB (cost, not outage) | Per-user write-unit budget (decision 39), API Gateway throttling on Day 16, AWS budget alarm. Longer term, threats as their own items would make an edit ~1 KB |
+| **Tampering** | A forged or replayed queue message runs or changes someone's scan | Only the API can send to the queue (IAM, Day 16). Messages are ids only and are checked against a strict schema; the worker reloads the scan by its owner key, and repeats of a finished scan do nothing (decisions 42, 43) |
+| **Denial of service** | One account starts scans in a loop and has us hammer OSV/EPSS | 10 scans per user per hour, 200 overall, 1 MB uploads, 20,000 dependencies per file (decision 46) |
 | **Denial of service** | OSV/EPSS rate-limit or go down | Cache responses in DynamoDB with a TTL, back off and retry, and mark the scan "partial" instead of failing |
 | **Elevation of privilege** | A compromised Lambda reaches other AWS resources | One IAM role per function, least privilege (the worker can't read secrets, the API can't read the queue) |

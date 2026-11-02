@@ -13,7 +13,8 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
 
 from threatlens_api.auth import LOCAL_ISSUER, JwksKeys
-from threatlens_api.drafting import DraftBudget, DraftResult
+from threatlens_api.drafting import DraftResult
+from threatlens_api.limits import HourlyBudget
 from threatlens_api.main import create_app
 from threatlens_api.settings import Settings
 from threatlens_api.threats import ThreatDraft
@@ -217,7 +218,7 @@ class OneThreat:
 
 def test_per_user_draft_budget(app, client, anon, token):
     app.state.drafter = OneThreat()
-    app.state.draft_budget = DraftBudget(per_hour=10, per_user=1)
+    app.state.draft_budget = HourlyBudget(per_hour=10, per_user=1)
     alice_model = client.post("/threat-models", json=MODEL).json()["id"]
     bob = bearer(token("bob"))
     bob_model = anon.post("/threat-models", json=MODEL, headers=bob).json()["id"]
@@ -230,7 +231,7 @@ def test_per_user_draft_budget(app, client, anon, token):
 
 def test_budget_global_cap_still_applies_across_users():
     clock = [0.0]
-    budget = DraftBudget(per_hour=2, per_user=5, now=lambda: clock[0])
+    budget = HourlyBudget(per_hour=2, per_user=5, now=lambda: clock[0])
     assert budget.take("a") is None
     assert budget.take("b") is None
     assert budget.take("c") is not None
@@ -238,7 +239,7 @@ def test_budget_global_cap_still_applies_across_users():
 
 def test_budget_forgets_idle_users_when_it_gets_big():
     clock = [0.0]
-    budget = DraftBudget(per_hour=100_000, per_user=1, now=lambda: clock[0])
+    budget = HourlyBudget(per_hour=100_000, per_user=1, now=lambda: clock[0])
     for i in range(10_001):
         budget.take(f"user-{i}")
     clock[0] = 4_000

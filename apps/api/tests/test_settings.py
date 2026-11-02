@@ -17,6 +17,8 @@ def prod(**overrides):
         "cors_origins": ["https://threatlens.example.com"],
         "llm_api_key": GOOD_KEY,
         "store": "dynamodb",
+        "scan_queue_url": "https://sqs.eu-west-2.amazonaws.com/123456789012/threatlens-scans",
+        "uploads_bucket": "threatlens-uploads",
         **COGNITO,
     }
     return Settings(**{**values, **overrides}, _env_file=None)
@@ -149,3 +151,24 @@ def test_dynamodb_endpoint_must_be_a_plain_url(url):
 def test_dynamodb_table_name_is_checked(table):
     with pytest.raises(ValidationError):
         Settings(dynamodb_table=table, _env_file=None)
+
+
+@pytest.mark.parametrize("missing", ["scan_queue_url", "uploads_bucket"])
+def test_prod_needs_a_queue_and_a_bucket(missing):
+    with pytest.raises(ValidationError, match="SCAN_QUEUE_URL"):
+        prod(**{missing: None})
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("scan_queue_url", "http://sqs.example.com/q"),
+        ("scan_queue_url", "https://sqs.example.com/q?x=1"),
+        ("uploads_bucket", "Bad_Bucket"),
+        ("uploads_bucket", "-starts-with-dash"),
+        ("uploads_bucket", "ab"),
+    ],
+)
+def test_queue_and_bucket_are_checked(field, value):
+    with pytest.raises(ValidationError):
+        Settings(**{field: value}, _env_file=None)
