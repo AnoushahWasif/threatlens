@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { Suspense } from "react";
 
+import { RequireAuth } from "@/components/auth-provider";
 import { FindingsView } from "@/components/findings-view";
 
 // A static export can't pre-render a page per project, so the id travels as ?project=.
@@ -25,9 +26,11 @@ export default function FindingsPage() {
           come last because missing data isn&apos;t the same as low risk.
         </p>
       </div>
-      <Suspense fallback={null}>
-        <Findings />
-      </Suspense>
+      <RequireAuth>
+        <Suspense fallback={null}>
+          <Findings />
+        </Suspense>
+      </RequireAuth>
     </section>
   );
 }

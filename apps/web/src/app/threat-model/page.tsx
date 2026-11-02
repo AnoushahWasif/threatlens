@@ -3,6 +3,7 @@
 import { useSearchParams } from "next/navigation";
 import { Suspense } from "react";
 
+import { RequireAuth } from "@/components/auth-provider";
 import { NewThreatModel } from "@/components/new-threat-model";
 import { ThreatModelView } from "@/components/threat-model-view";
 
@@ -22,9 +23,11 @@ export default function ThreatModelPage() {
           Describe a system, let AI draft STRIDE threats, then accept, reject or rewrite each one.
         </p>
       </div>
-      <Suspense fallback={null}>
-        <ThreatModelPageBody />
-      </Suspense>
+      <RequireAuth>
+        <Suspense fallback={null}>
+          <ThreatModelPageBody />
+        </Suspense>
+      </RequireAuth>
     </section>
   );
 }

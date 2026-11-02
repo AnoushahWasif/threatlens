@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import { ApiError, type ApiErrorCode, type ApiErrorKind, KNOWN_CODES } from "@/lib/api-error";
 import { apiBaseUrl } from "@/lib/config";
+import { endSession, readSession } from "@/lib/session";
 import { type Finding, findingListSchema, sampleFindings } from "@/lib/findings";
 import { projectListSchema, SAMPLE_PROJECTS, type Project } from "@/lib/projects";
 import { sampleThreatModels } from "@/lib/sample-threat-models";
@@ -28,7 +29,13 @@ const errorBodySchema = z.object({ error: z.object({ code: z.string() }) });
 
 export type ProjectsResult = { source: "api" | "sample"; projects: Project[] };
 
-type Options = { baseUrl?: string | null; fetchImpl?: typeof fetch; signal?: AbortSignal };
+type Options = {
+  baseUrl?: string | null;
+  fetchImpl?: typeof fetch;
+  signal?: AbortSignal;
+  /** Leave out to use the signed-in session; null sends no token. */
+  token?: string | null;
+};
 type Init = { method?: "GET" | "POST" | "PATCH" | "DELETE"; body?: unknown };
 
 export type FindingsResult = { source: "api" | "sample"; findings: Finding[] };
@@ -72,6 +79,7 @@ async function request<T>(
   init: Init = {},
 ): Promise<T> {
   const fetchImpl = options.fetchImpl ?? fetch;
+  const token = options.token === undefined ? (readSession()?.accessToken ?? null) : options.token;
   // One timer for the whole exchange, so a server that sends headers and then stalls
   // the body still times out.
   const timeout = new AbortController();
@@ -87,12 +95,13 @@ async function request<T>(
     let response: Response;
     try {
       const hasBody = init.body !== undefined;
+      const headers: Record<string, string> = { accept: "application/json" };
+      if (hasBody) headers["content-type"] = "application/json";
+      if (token) headers.authorization = `Bearer ${token}`;
       response = await fetchImpl(url, {
         method: init.method ?? "GET",
         signal,
-        headers: hasBody
-          ? { accept: "application/json", "content-type": "application/json" }
-          : { accept: "application/json" },
+        headers,
         body: hasBody ? JSON.stringify(init.body) : undefined,
         credentials: "omit",
         redirect: "error",
@@ -102,6 +111,12 @@ async function request<T>(
       throw failure("network");
     }
 
+    if (response.status === 401) {
+      const error = await httpError(response);
+      // Our token was refused: drop it so the app sends the user back to sign in.
+      if (options.token === undefined) endSession();
+      throw new ApiError("unauthorized", 401, error.code);
+    }
     if (!response.ok) throw await httpError(response);
     if (schema === null) {
       // 204: nothing to read. Cancel the body so the connection is freed.
@@ -152,6 +167,24 @@ async function httpError(response: Response): Promise<ApiError> {
   const seconds = header && /^\d{1,6}$/.test(header) ? Number(header) : undefined;
   const retryAfter = seconds === undefined ? undefined : Math.min(seconds, MAX_RETRY_AFTER);
   return new ApiError("http", response.status, code, retryAfter);
+}
+
+// --- local sign-in -----------------------------------------------------------
+
+const localTokenSchema = z.object({
+  access_token: z.string().min(20).max(8_192),
+  token_type: z.literal("Bearer"),
+  expires_in: z.number().int().positive().max(86_400),
+});
+
+/** Dev only: the API's stand-in issuer (POST /dev/token). The API refuses this mode in prod. */
+export async function requestLocalToken(username: string, options: Options = {}) {
+  const baseUrl = options.baseUrl === undefined ? apiBaseUrl() : options.baseUrl;
+  if (baseUrl === null) throw new ApiError("network");
+  return request(`${baseUrl}/dev/token`, localTokenSchema, { ...options, token: null }, {
+    method: "POST",
+    body: { username },
+  });
 }
 
 // --- threat models ----------------------------------------------------------
