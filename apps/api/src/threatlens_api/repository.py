@@ -16,6 +16,7 @@ picking a clever username.
 
 import json
 import logging
+import random
 import threading
 import time
 import uuid
@@ -189,6 +190,13 @@ _BUSY = {
 }
 
 
+_THROTTLED = {"ThrottlingError", "ProvisionedThroughputExceeded"}
+
+
+def _busy() -> ApiError:
+    return ApiError(503, "storage_busy", "Storage is busy. Try again", headers={"Retry-After": "2"})
+
+
 def dynamodb_client(region: str, endpoint_url: str | None = None):
     config = Config(
         connect_timeout=2,
@@ -246,9 +254,7 @@ class DynamoRepository:
             code = e.response["Error"]["Code"]
             if code in _BUSY:
                 log.warning("dynamodb busy", extra={"code": code, "operation": operation})
-                raise ApiError(
-                    503, "storage_busy", "Storage is busy. Try again", headers={"Retry-After": "2"}
-                ) from e
+                raise _busy() from e
             raise
         except BotoCoreError as e:
             # Connection refused, timeouts, no credentials: the store can't be reached.
@@ -285,9 +291,14 @@ class DynamoRepository:
                 reasons = [r.get("Code") for r in e.response.get("CancellationReasons", [])]
                 if reasons and reasons[0] == "ConditionalCheckFailed":
                     raise too_many(counter, max_per_user) from e
+                # A transaction cancelled for capacity says so per item, not in the top code.
+                if _THROTTLED & set(reasons):
+                    raise _busy() from e
                 if "TransactionConflict" not in reasons:
                     raise
                 # Another create for the same user touched the counter at the same moment.
+                # Wait a little, or the two will usually collide again straight away.
+                time.sleep(random.uniform(0.01, 0.05))  # noqa: S311 - timing jitter, not a secret
         raise ApiError(409, "edit_conflict", "Too many changes at once. Try again")
 
     def create_model(self, model: ThreatModel, max_per_user: int) -> None:

@@ -23,7 +23,7 @@ from threatlens_api.repository import (
     create_table,
 )
 from threatlens_api.settings import Settings
-from threatlens_api.store import ProjectStore, ThreatModelStore
+from threatlens_api.store import ProjectStore, ThreatModelStore, WriteBudget, write_units
 from threatlens_api.threats import (
     Threat,
     ThreatDraft,
@@ -502,3 +502,98 @@ def test_create_retries_a_transaction_conflict_then_gives_up(dynamodb):
     with pytest.raises(ApiError) as e:
         DynamoRepository(always, table).create_model(model(), max_per_user=5)
     assert (e.value.status, e.value.code, always.calls) == (409, "edit_conflict", 3)
+
+
+# --- review of #22: throttled transactions, write cost -------------------------------------
+
+
+@pytest.mark.parametrize("reason", ["ThrottlingError", "ProvisionedThroughputExceeded"])
+def test_throttled_create_transaction_is_a_503(reason):
+    error = ClientError(
+        {
+            "Error": {"Code": "TransactionCanceledException", "Message": "x"},
+            "CancellationReasons": [{"Code": reason}, {"Code": "None"}],
+        },
+        "TransactWriteItems",
+    )
+    with pytest.raises(ApiError) as e:
+        DynamoRepository(Broken(error), "t").create_model(model(), max_per_user=5)
+    assert (e.value.status, e.value.code, e.value.headers["Retry-After"]) == (
+        503,
+        "storage_busy",
+        "2",
+    )
+
+
+def test_write_units_follow_dynamodb_billing():
+    small = model()
+    assert write_units(small) == 1
+    big = model(threats=[big_threat(f"T{i}", "x" * 1_000) for i in range(10)])
+    assert write_units(big) == -(-len(big.model_dump_json().encode()) // 1024)
+
+
+def test_write_budget_is_per_user_and_rolls_over():
+    clock = Clock()
+    budget = WriteBudget(per_user=100, now=clock)
+    budget.take("alice", 60)
+    budget.take("alice", 40)
+    with pytest.raises(ApiError) as e:
+        budget.take("alice", 1)
+    assert (e.value.status, e.value.code) == (429, "write_limit")
+    assert e.value.headers["Retry-After"] == "3600"
+    budget.take("bob", 100)  # bob has his own budget
+
+    clock.now += 1_800
+    with pytest.raises(ApiError) as e:
+        budget.take("alice", 1)
+    assert e.value.headers["Retry-After"] == "1800"
+    clock.now += 1_800
+    budget.take("alice", 100)  # the first hour's writes have rolled out
+
+
+def test_write_budget_forgets_idle_users_when_it_gets_big():
+    clock = Clock()
+    budget = WriteBudget(per_user=10, now=clock)
+    for i in range(10_001):
+        budget.take(f"user-{i}", 1)
+    clock.now += 3_600
+    budget.take("late", 1)
+    assert len(budget._used) == 1
+
+
+def test_a_refused_write_is_not_saved_and_costs_nothing(repo):
+    budget = WriteBudget(per_user=3)
+    store = ThreatModelStore(repo, budget=budget)
+    m = store.create("alice", ThreatModelCreate(name="x", architecture=ARCH))
+    store.add_threat("alice", m.id, threat("A"))
+    store.add_threat("alice", m.id, threat("B"))
+    with pytest.raises(ApiError) as e:
+        store.add_threat("alice", m.id, threat("C"))
+    assert e.value.code == "write_limit"
+    assert [t.title for t in store.get("alice", m.id).threats] == ["A", "B"]
+
+
+def test_clash_retries_are_charged_like_dynamodb_charges_them(repo):
+    budget = WriteBudget(per_user=1_000)
+    plain = ThreatModelStore(repo)
+    m = plain.create("alice", ThreatModelCreate(name="x", architecture=ARCH))
+    racing = Interrupting(repo, ThreatModelStore, times=1)
+    ThreatModelStore(racing, budget=budget).add_threat("alice", m.id, threat("Mine"))
+    assert budget._totals["alice"] == 2  # two save attempts, one unit each
+
+
+def test_edit_loop_on_a_big_model_hits_the_limit(app, client):
+    app.state.threat_models.budget.per_user = 2_000
+    model_id = client.post("/threat-models", json={"name": "x", "architecture": ARCH}).json()["id"]
+    long = {"description": "d" * 1_000, "mitigation": "m" * 1_000}
+    for i in range(60):
+        r = client.post(
+            f"/threat-models/{model_id}/threats",
+            json={"category": "tampering", "title": f"T{i}", **long},
+        )
+        if r.status_code == 429:
+            break
+    assert (r.status_code, r.json()["error"]["code"]) == (429, "write_limit")
+    assert int(r.headers["retry-after"]) > 0
+    # Projects share the same budget, so switching between them doesn't double it.
+    assert app.state.projects.budget is app.state.threat_models.budget

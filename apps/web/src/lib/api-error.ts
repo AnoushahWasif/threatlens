@@ -34,6 +34,7 @@ export const KNOWN_CODES = [
   "too_many_projects",
   "storage_busy",
   "storage_unavailable",
+  "write_limit",
 ] as const;
 export type ApiErrorCode = (typeof KNOWN_CODES)[number];
 

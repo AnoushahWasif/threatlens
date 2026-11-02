@@ -23,7 +23,7 @@ from threatlens_api.repository import (
 from threatlens_api.routes_projects import router as projects_router
 from threatlens_api.routes_threats import router as threats_router
 from threatlens_api.settings import Settings, get_settings
-from threatlens_api.store import ProjectStore, ThreatModelStore
+from threatlens_api.store import ProjectStore, ThreatModelStore, WriteBudget
 
 log = logging.getLogger("threatlens")
 
@@ -72,8 +72,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         repo = DynamoRepository(app.state.dynamodb, settings.dynamodb_table)
     else:
         repo = MemoryRepository()
-    app.state.threat_models = ThreatModelStore(repo)
-    app.state.projects = ProjectStore(repo)
+    # One budget for both, so a user can't spend it twice by switching between them.
+    writes = WriteBudget(settings.write_units_per_user_per_hour)
+    app.state.threat_models = ThreatModelStore(repo, budget=writes)
+    app.state.projects = ProjectStore(repo, budget=writes)
     app.state.drafter = make_drafter(settings)
     app.state.draft_budget = DraftBudget(
         settings.llm_drafts_per_hour, per_user=settings.llm_drafts_per_user_per_hour

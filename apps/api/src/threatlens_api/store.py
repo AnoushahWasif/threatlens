@@ -4,6 +4,11 @@ Every change is read, applied, then saved only if nobody saved in between. On a 
 change is applied again to the fresh copy, so two edits never overwrite each other.
 """
 
+import math
+import random
+import threading
+import time
+from collections import deque
 from collections.abc import Callable
 from typing import TypeVar
 from uuid import UUID
@@ -37,19 +42,71 @@ def _key(t: ThreatDraft) -> tuple[str, str]:
     return (t.category, t.title.casefold())
 
 
+def write_units(item: ThreatModel | Project) -> int:
+    # DynamoDB bills a write unit per KB of the whole item, rounded up.
+    return max(1, math.ceil(len(item.model_dump_json().encode()) / 1024))
+
+
+class WriteBudget:
+    """Write units per user per rolling hour. Every threat edit rewrites the whole model, so
+    a script editing a large model in a loop would otherwise cost real money with no LLM
+    call involved. Per process; API Gateway throttling (day 16) is the shared limit."""
+
+    WINDOW = 3_600
+
+    def __init__(self, per_user: int, now: Callable[[], float] = time.monotonic):
+        self.per_user = per_user
+        self._now = now
+        self._lock = threading.Lock()
+        self._used: dict[str, deque[tuple[float, int]]] = {}
+        self._totals: dict[str, int] = {}
+
+    def take(self, user_id: str, units: int) -> None:
+        now = self._now()
+        with self._lock:
+            if len(self._used) > 10_000:
+                # Drop callers with nothing left in the window, so the dicts can't grow forever.
+                for k in [k for k, v in self._used.items() if now - v[-1][0] >= self.WINDOW]:
+                    del self._used[k], self._totals[k]
+            used = self._used.setdefault(user_id, deque())
+            total = self._totals.get(user_id, 0)
+            while used and now - used[0][0] >= self.WINDOW:
+                total -= used.popleft()[1]
+            if total + units > self.per_user:
+                self._totals[user_id] = total
+                wait = self.WINDOW - (now - used[0][0]) if used else 1
+                if not used:
+                    del self._used[user_id], self._totals[user_id]
+                raise ApiError(
+                    429,
+                    "write_limit",
+                    "Too many changes this hour",
+                    headers={"Retry-After": str(max(1, math.ceil(wait)))},
+                )
+            used.append((now, units))
+            self._totals[user_id] = total + units
+
+
 class ThreatModelStore:
     def __init__(
         self,
         repo: Repository,
         max_threats: int = MAX_THREATS_PER_MODEL,
         max_per_user: int = MAX_MODELS_PER_USER,
+        budget: WriteBudget | None = None,
     ):
         self.repo = repo
         self.max_threats = max_threats
         self.max_per_user = max_per_user
+        self.budget = budget
+
+    def _charge(self, owner: str, model: ThreatModel) -> None:
+        if self.budget is not None:
+            self.budget.take(owner, write_units(model))
 
     def create(self, owner: str, data: ThreatModelCreate) -> ThreatModel:
         model = ThreatModel(**data.model_dump(), owner_id=owner)
+        self._charge(owner, model)
         self.repo.create_model(model, self.max_per_user)
         return model
 
@@ -64,9 +121,14 @@ class ThreatModelStore:
         return found
 
     def _change(self, owner: str, model_id: UUID, change: Callable[[ThreatModel], T]) -> T:
-        for _ in range(SAVE_ATTEMPTS):
+        for attempt in range(SAVE_ATTEMPTS):
+            if attempt:
+                # Two writers that just clashed would usually clash again at once.
+                time.sleep(random.uniform(0.01, 0.05))  # noqa: S311 - timing jitter, not a secret
             model, version = self._load(owner, model_id)
             result = change(model)
+            # Charged per attempt: DynamoDB bills a failed conditional write too.
+            self._charge(owner, model)
             try:
                 self.repo.save_model(model, version)
             except Conflict:
@@ -177,12 +239,20 @@ class ThreatModelStore:
 
 
 class ProjectStore:
-    def __init__(self, repo: Repository, max_per_user: int = MAX_PROJECTS_PER_USER):
+    def __init__(
+        self,
+        repo: Repository,
+        max_per_user: int = MAX_PROJECTS_PER_USER,
+        budget: WriteBudget | None = None,
+    ):
         self.repo = repo
         self.max_per_user = max_per_user
+        self.budget = budget
 
     def create(self, owner: str, data: ProjectCreate) -> Project:
         project = Project(**data.model_dump(), owner_id=owner)
+        if self.budget is not None:
+            self.budget.take(owner, write_units(project))
         self.repo.create_project(owner, project, self.max_per_user)
         return project
 
