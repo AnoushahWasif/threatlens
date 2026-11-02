@@ -18,6 +18,10 @@ class Settings(BaseSettings):
     # Per user as well, so one account can't use up everyone's drafts.
     llm_drafts_per_user_per_hour: int = Field(default=5, ge=1, le=1_000)
     max_request_bytes: int = 1_000_000
+    # DynamoDB write units (1 per KB written) per user per hour. 20,000 is about $0.60 a day
+    # per account at on-demand prices, far above a person editing by hand even on a model
+    # near the size limit (~340 units a save).
+    write_units_per_user_per_hour: int = Field(default=20_000, ge=100, le=10_000_000)
 
     # "local" runs a stand-in token issuer in this process; prod must use Cognito.
     auth_mode: Literal["local", "cognito"] = "local"

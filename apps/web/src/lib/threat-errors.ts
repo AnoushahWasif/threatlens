@@ -20,6 +20,7 @@ const BY_CODE: Partial<Record<ApiErrorCode, string>> = {
   too_large: "This threat model is too big to save. Shorten or remove some threats.",
   storage_busy: "The server is busy. Try again in a moment.",
   storage_unavailable: "The server can't reach its storage right now. Try again later.",
+  write_limit: "You've made a lot of changes this hour. Wait a while and try again.",
 };
 
 export function errorMessage(error: unknown): string {
