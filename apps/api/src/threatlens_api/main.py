@@ -46,6 +46,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.threat_models = ThreatModelStore()
     app.state.drafter = make_drafter(settings)
     app.state.draft_budget = DraftBudget(settings.llm_drafts_per_hour)
+    app.state.drafts_in_progress = set()
 
     app.add_middleware(
         CORSMiddleware,

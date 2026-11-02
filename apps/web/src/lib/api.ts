@@ -6,6 +6,8 @@ import { type Finding, findingListSchema, sampleFindings } from "@/lib/findings"
 import { projectListSchema, SAMPLE_PROJECTS, type Project } from "@/lib/projects";
 import { sampleThreatModels } from "@/lib/sample-threat-models";
 import {
+  type DraftResult,
+  draftResultSchema,
   type ModelInput,
   type Threat,
   type ThreatInput,
@@ -161,7 +163,7 @@ export interface ThreatModelBackend {
   source: Source;
   create(input: ModelInput): Promise<ThreatModel>;
   get(id: string): Promise<ThreatModel>;
-  draft(id: string): Promise<ThreatModel>;
+  draft(id: string): Promise<DraftResult>;
   addThreat(id: string, input: ThreatInput): Promise<Threat>;
   updateThreat(id: string, threatId: string, patch: ThreatPatch): Promise<Threat>;
   deleteThreat(id: string, threatId: string): Promise<void>;
@@ -195,7 +197,7 @@ export function threatModelBackend(options: Options = {}): ThreatModelBackend {
     },
     draft: async (id) => {
       const [m] = path(id);
-      return call(`${root}/${m}/draft`, threatModelSchema, { method: "POST" });
+      return call(`${root}/${m}/draft`, draftResultSchema, { method: "POST" });
     },
     addThreat: async (id, input) => {
       const [m] = path(id);

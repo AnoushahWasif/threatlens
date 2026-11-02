@@ -16,6 +16,8 @@ export const KNOWN_CODES = [
   "payload_too_large",
   "storage_full",
   "too_many_threats",
+  "duplicate_threat",
+  "draft_in_progress",
   "llm_disabled",
   "draft_limit",
   "llm_refused",

@@ -115,7 +115,32 @@ describe("ThreatModelView", () => {
     expect(within(card("SQL injection in order search")).getByText("Rejected")).toBeInTheDocument();
   });
 
+  it("says when re-drafting added nothing because the model is full", async () => {
+    withBackend({
+      draft: async (id) => ({ model: await sampleThreatModels.get(id), added: 0, dropped: 3 }),
+    });
+    await open();
+    fireEvent.click(screen.getByRole("button", { name: "Draft again with AI" }));
+    // Not full here, so the reason given is repeats, not the cap.
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "0 new AI-drafted threats to review. Anything you had reviewed or edited was kept. 3 skipped",
+    );
+  });
+
+  it("refuses an edit that would duplicate another threat, and keeps the form open", async () => {
+    await open();
+    fireEvent.click(within(card("Card data written to logs")).getByRole("button", { name: "Edit" }));
+    fireEvent.change(screen.getByLabelText("STRIDE category"), { target: { value: "spoofing" } });
+    fireEvent.change(screen.getByLabelText("Title"), {
+      target: { value: "staff session hijacked to issue refunds" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("already a threat with this title");
+    expect(screen.getByRole("button", { name: "Save changes" })).toBeEnabled();
+  });
+
   it.each([
+    ["draft_in_progress", undefined, /already running/],
     ["llm_disabled", undefined, /AI drafting is turned off/],
     ["draft_limit", 90, /Try again in about 2 minutes/],
     ["llm_refused", undefined, /declined to draft/],

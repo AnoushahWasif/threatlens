@@ -82,12 +82,16 @@ export function ThreatModelView({ modelId }: { modelId: string }) {
     setDrafting(true);
     setNotice(null);
     try {
-      const updated = await actions.draft();
-      const added = updated.threats.filter((t) => t.source === "llm" && t.status === "draft").length;
-      setNotice({
-        kind: "ok",
-        text: `${added} AI-drafted threat${added === 1 ? "" : "s"} to review. Anything you had reviewed or edited was kept.`,
-      });
+      const { added, dropped, model: updated } = await actions.draft();
+      const plural = (n: number) => (n === 1 ? "" : "s");
+      let text = `${added} new AI-drafted threat${plural(added)} to review. Anything you had reviewed or edited was kept.`;
+      if (dropped > 0) {
+        text +=
+          updated.threats.length >= LIMITS.threats
+            ? ` ${dropped} more didn't fit: a model holds at most ${LIMITS.threats} threats.`
+            : ` ${dropped} skipped because they repeated a threat already here or weren't usable.`;
+      }
+      setNotice({ kind: added === 0 && dropped > 0 ? "error" : "ok", text });
     } catch (error) {
       setNotice({ kind: "error", text: errorMessage(error) });
     } finally {

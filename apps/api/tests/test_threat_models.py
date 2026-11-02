@@ -1,3 +1,5 @@
+from uuid import UUID
+
 import pytest
 
 from threatlens_api.drafting import DraftBudget, DraftError, DraftResult
@@ -90,8 +92,9 @@ def test_draft_stores_threats_as_drafts(app, client, new_model):
     assert r.status_code == 200
     body = r.json()
     assert fake.calls == [ARCH]
-    assert body["drafted_with"] == "fake-model"
-    assert [(t["status"], t["source"]) for t in body["threats"]] == [("draft", "llm")] * 2
+    assert (body["added"], body["dropped"]) == (2, 0)
+    assert body["model"]["drafted_with"] == "fake-model"
+    assert [(t["status"], t["source"]) for t in body["model"]["threats"]] == [("draft", "llm")] * 2
 
 
 def test_redraft_keeps_what_a_person_touched(app, client, new_model):
@@ -101,14 +104,14 @@ def test_redraft_keeps_what_a_person_touched(app, client, new_model):
         [draft("A"), draft("B"), draft("C"), draft("New")],
     )
     model_id = new_model()
-    threats = client.post(f"/threat-models/{model_id}/draft").json()["threats"]
+    threats = client.post(f"/threat-models/{model_id}/draft").json()["model"]["threats"]
     a, b, c, _ = (t["id"] for t in threats)
     client.patch(f"/threat-models/{model_id}/threats/{a}", json={"status": "accepted"})
     client.patch(f"/threat-models/{model_id}/threats/{b}", json={"status": "rejected"})
     client.patch(f"/threat-models/{model_id}/threats/{c}", json={"mitigation": "Mine now"})
     client.post(f"/threat-models/{model_id}/threats", json=draft("Manual").model_dump())
 
-    after = client.post(f"/threat-models/{model_id}/draft").json()["threats"]
+    after = client.post(f"/threat-models/{model_id}/draft").json()["model"]["threats"]
     by_title = {t["title"]: t for t in after}
     # A, B, C were touched so they stay as they were and aren't re-added; D was untouched
     # so it's replaced; "New" arrives as a draft.
@@ -246,9 +249,11 @@ def test_limits_on_models_and_threats(app, client, new_model):
     r = client.post(f"/threat-models/{model_id}/threats", json=draft("C").model_dump())
     assert r.status_code == 409
 
-    # Drafting past the cap adds what fits and nothing more.
+    # Drafting past the cap adds nothing, and says so instead of failing silently.
     use(app, [draft("D")])
-    assert len(client.post(f"/threat-models/{model_id}/draft").json()["threats"]) == 2
+    body = client.post(f"/threat-models/{model_id}/draft").json()
+    assert len(body["model"]["threats"]) == 2
+    assert (body["added"], body["dropped"]) == (0, 1)
 
 
 def test_make_drafter_only_when_configured():
@@ -257,3 +262,87 @@ def test_make_drafter_only_when_configured():
     assert make_drafter(Settings(llm_api_key=key, _env_file=None)) is None  # key alone isn't "on"
     on = make_drafter(Settings(llm_provider="anthropic", llm_api_key=key, _env_file=None))
     assert on.model_name == "claude-opus-5-5"
+
+
+def test_redraft_counts_repeats_of_reviewed_threats_as_dropped(app, client, new_model):
+    use(app, [draft("A"), draft("B")], [draft("A"), draft("B"), draft("C")])
+    model_id = new_model()
+    first = client.post(f"/threat-models/{model_id}/draft").json()["model"]["threats"]
+    client.patch(f"/threat-models/{model_id}/threats/{first[0]['id']}", json={"status": "accepted"})
+    body = client.post(f"/threat-models/{model_id}/draft").json()
+    # "A" is accepted so its repeat is skipped; "B" was untouched so it's replaced.
+    assert (body["added"], body["dropped"]) == (2, 1)
+
+
+def test_second_draft_while_one_is_running_is_refused(app, client, new_model):
+    model_id = new_model()
+    store = app.state.threat_models
+    other = new_model()
+
+    class Slow(FakeDrafter):
+        nested = None
+
+        async def draft(self, architecture):
+            if self.nested is None:
+                # While this LLM call is still out, the same model is asked again, and so is
+                # another model. Only the first call does this, so the requests don't recurse.
+                self.nested = (
+                    client.post(f"/threat-models/{model_id}/draft"),
+                    client.post(f"/threat-models/{other}/draft"),
+                )
+            return await super().draft(architecture)
+
+    slow = Slow([draft("A")], [draft("B")], DraftError("upstream"))
+    app.state.drafter = slow
+    assert client.post(f"/threat-models/{model_id}/draft").status_code == 200
+    same, different = slow.nested
+    assert same.status_code == 409
+    assert same.json()["error"]["code"] == "draft_in_progress"
+    assert different.status_code == 200
+    assert len(slow.calls) == 2  # the refused request never reached the LLM
+
+    # The guard is released afterwards, after a failure too.
+    assert client.post(f"/threat-models/{model_id}/draft").status_code == 502
+    assert app.state.drafts_in_progress == set()
+    assert len(store.get(UUID(model_id)).threats) == 1
+
+
+@pytest.mark.parametrize(
+    ("second", "patch"),
+    [
+        (("Other", "spoofing"), {"title": "forged session token"}),  # rename onto it
+        (("Forged session token", "tampering"), {"category": "spoofing"}),  # move onto it
+    ],
+)
+def test_edit_cannot_create_a_duplicate(client, new_model, second, patch):
+    model_id = new_model()
+    url = f"/threat-models/{model_id}/threats"
+    client.post(url, json=draft().model_dump())
+    second = client.post(url, json=draft(*second).model_dump()).json()
+    r = client.patch(f"{url}/{second['id']}", json=patch)
+    assert r.status_code == 409
+    assert r.json()["error"]["code"] == "duplicate_threat"
+
+
+def test_duplicate_check_ignores_the_threat_itself_and_other_categories(client, new_model):
+    model_id = new_model()
+    url = f"/threat-models/{model_id}/threats"
+    threat = client.post(url, json=draft().model_dump()).json()
+    # Same title, different case, on itself: fine.
+    assert (
+        client.patch(f"{url}/{threat['id']}", json={"title": "FORGED SESSION TOKEN"}).status_code
+        == 200
+    )
+    # Same title in another category: a different threat.
+    assert (
+        client.post(url, json=draft("Forged session token", "tampering").model_dump()).status_code
+        == 201
+    )
+
+
+def test_adding_a_duplicate_by_hand_is_refused(client, new_model):
+    model_id = new_model()
+    url = f"/threat-models/{model_id}/threats"
+    assert client.post(url, json=draft().model_dump()).status_code == 201
+    r = client.post(url, json=draft("  Forged Session Token  ").model_dump())
+    assert r.json()["error"]["code"] == "duplicate_threat"

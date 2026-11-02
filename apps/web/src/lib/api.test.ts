@@ -250,9 +250,9 @@ describe("threatModelBackend", () => {
     expect(fetchImpl.mock.calls[0][1]).toMatchObject({ method: "DELETE" });
   });
 
-  it("POSTs to /draft with no body", async () => {
-    const fetchImpl = respond(MODEL);
-    await api(fetchImpl).draft(MODEL_ID);
+  it("POSTs to /draft with no body and reads the counts", async () => {
+    const fetchImpl = respond({ model: MODEL, added: 1, dropped: 2 });
+    expect(await api(fetchImpl).draft(MODEL_ID)).toMatchObject({ added: 1, dropped: 2 });
     const [url, init] = fetchImpl.mock.calls[0];
     expect(url).toBe(`${BASE}/threat-models/${MODEL_ID}/draft`);
     expect(init).toMatchObject({ method: "POST", body: undefined });
@@ -291,6 +291,11 @@ describe("threatModelBackend", () => {
     expect(error.kind).toBe("http");
     expect(error.retryAfter).toBeUndefined();
     if (_name !== "a bad Retry-After") expect(error.code).toBeUndefined();
+  });
+
+  it("rejects a draft result with nonsense counts", async () => {
+    const fetchImpl = respond({ model: MODEL, added: -1, dropped: 0 });
+    expect((await failure(api(fetchImpl).draft(MODEL_ID))).kind).toBe("invalid");
   });
 
   it("rejects a threat model that doesn't match the schema", async () => {

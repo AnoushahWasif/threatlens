@@ -121,6 +121,12 @@ export function resetSampleThreatModels() {
   models = seed();
 }
 
+function checkUnique(model: ThreatModel, input: ThreatInput, ignore?: string) {
+  if (model.threats.some((t) => t.id !== ignore && key(t) === key(input))) {
+    throw new ApiError("http", 409, "duplicate_threat");
+  }
+}
+
 function find(id: string): ThreatModel {
   const model = models.get(id);
   if (!model) throw new ApiError("not-found", 404, "not_found");
@@ -169,7 +175,7 @@ export const sampleThreatModels: ThreatModelBackend = {
     model.threats = [...kept, ...added];
     model.drafted_with = SAMPLE_DRAFTER;
     model.drafted_at = now();
-    return copy(model);
+    return { model: copy(model), added: added.length, dropped: SAMPLE_DRAFTS.length - added.length };
   },
 
   async addThreat(id, input) {
@@ -177,6 +183,7 @@ export const sampleThreatModels: ThreatModelBackend = {
     if (model.threats.length >= LIMITS.threats) {
       throw new ApiError("http", 409, "too_many_threats");
     }
+    checkUnique(model, input);
     const added = threat({ ...input, status: "accepted", source: "manual", created_at: now(), updated_at: now() });
     model.threats.push(added);
     return copy(added);
@@ -188,6 +195,7 @@ export const sampleThreatModels: ThreatModelBackend = {
     const current = model.threats[index]!;
     const edited = current.edited || TEXT_FIELDS.some((f) => f in patch && patch[f] !== current[f]);
     const updated = { ...current, ...patch, edited, updated_at: now() };
+    checkUnique(model, updated, threatId);
     model.threats[index] = updated;
     return copy(updated);
   },

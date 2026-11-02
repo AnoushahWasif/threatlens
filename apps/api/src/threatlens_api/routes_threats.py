@@ -4,8 +4,9 @@ from uuid import UUID
 
 from fastapi import APIRouter, Request, Response
 
-from threatlens_api.drafting import DraftError
+from threatlens_api.drafting import Drafter, DraftError
 from threatlens_api.errors import ApiError
+from threatlens_api.models import Strict
 from threatlens_api.store import ThreatModelStore
 from threatlens_api.threats import Threat, ThreatDraft, ThreatModel, ThreatModelCreate, ThreatUpdate
 
@@ -20,6 +21,13 @@ DRAFT_ERRORS = {
     "rate_limited": (503, "llm_busy", "The LLM provider is busy; try again in a minute"),
     "upstream": (502, "llm_unavailable", "Couldn't reach the LLM provider"),
 }
+
+
+class DraftResponse(Strict):
+    model: ThreatModel
+    # New drafts stored, and drafts skipped (unusable, repeats, or no room left in the model).
+    added: int
+    dropped: int
 
 
 def _store(request: Request) -> ThreatModelStore:
@@ -37,12 +45,29 @@ async def get_threat_model(model_id: UUID, request: Request) -> ThreatModel:
 
 
 @router.post("/{model_id}/draft")
-async def draft_threats(model_id: UUID, request: Request) -> ThreatModel:
+async def draft_threats(model_id: UUID, request: Request) -> DraftResponse:
     store = _store(request)
     model = store.get(model_id)
     drafter = request.app.state.drafter
     if drafter is None:
         raise ApiError(503, "llm_disabled", "Threat drafting is turned off on this server")
+
+    # A second draft while one is running would bill twice and then overwrite the first.
+    # This guard is per process; day 13 moves it to a conditional write in DynamoDB.
+    in_progress: set[UUID] = request.app.state.drafts_in_progress
+    if model_id in in_progress:
+        raise ApiError(409, "draft_in_progress", "A draft for this model is already running")
+    in_progress.add(model_id)
+    try:
+        return await _draft(store, model, drafter, request)
+    finally:
+        in_progress.discard(model_id)
+
+
+async def _draft(
+    store: ThreatModelStore, model: ThreatModel, drafter: Drafter, request: Request
+) -> DraftResponse:
+    model_id = model.id
 
     # Counted before the call: a failed call can still be billed.
     wait = request.app.state.draft_budget.take()
@@ -63,8 +88,12 @@ async def draft_threats(model_id: UUID, request: Request) -> ThreatModel:
         headers = {"Retry-After": "60"} if e.kind == "rate_limited" else None
         raise ApiError(status, code, message, headers=headers) from e
 
-    store.replace_drafts(model_id, result.threats, drafter.model_name)
-    return store.get(model_id)
+    added = store.replace_drafts(model_id, result.threats, drafter.model_name)
+    return DraftResponse(
+        model=store.get(model_id),
+        added=added,
+        dropped=result.dropped + len(result.threats) - added,
+    )
 
 
 @router.post("/{model_id}/threats", status_code=201)
