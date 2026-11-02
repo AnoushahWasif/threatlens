@@ -1,15 +1,17 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   ApiError,
   fetchFindings,
   fetchProjects,
   MAX_RESPONSE_BYTES,
+  requestLocalToken,
   threatModelBackend,
   TIMEOUT_MS,
 } from "@/lib/api";
 import { SAMPLE_FINDINGS } from "@/lib/findings";
 import { MAX_PROJECTS, SAMPLE_PROJECTS } from "@/lib/projects";
+import { clearSession, readSession, saveSession, SIGNED_OUT_EVENT } from "@/lib/session";
 
 const BASE = "https://api.threatlens.dev";
 const PROJECT = {
@@ -62,7 +64,7 @@ describe("fetchProjects", () => {
     expect(projects[0]).not.toHaveProperty("owner_email");
   });
 
-  it.each([500, 401, 404])("turns HTTP %i into an http error with the status", async (status) => {
+  it.each([500, 403, 404])("turns HTTP %i into an http error with the status", async (status) => {
     const error = await failure(fetchProjects({ baseUrl: BASE, fetchImpl: respond("{}", { status }) }));
     expect(error.kind).toBe("http");
     expect(error.status).toBe(status);
@@ -301,5 +303,53 @@ describe("threatModelBackend", () => {
   it("rejects a threat model that doesn't match the schema", async () => {
     const bad = { ...MODEL, threats: [{ ...THREAT, category: "phishing" }] };
     expect((await failure(api(respond(bad)).get(MODEL_ID))).kind).toBe("invalid");
+  });
+});
+
+
+describe("auth on API calls", () => {
+  // Built at runtime: a fake JWT written out as a literal trips the secret scanner.
+  const TOKEN = ["header", btoa(JSON.stringify({ exp: 9_999_999_999 })), "signature"].join(".");
+
+  beforeEach(() => {
+    clearSession();
+  });
+
+  it("sends the session's access token as a bearer token", async () => {
+    saveSession({ accessToken: TOKEN, username: "alice", expiresAt: Date.now() + 3_600_000 });
+    const fetchImpl = respond([]);
+    await fetchProjects({ baseUrl: BASE, fetchImpl });
+    expect(fetchImpl.mock.calls[0][1]?.headers).toMatchObject({ authorization: `Bearer ${TOKEN}` });
+  });
+
+  it("sends no Authorization header when signed out, and never a cookie", async () => {
+    const fetchImpl = respond([]);
+    await fetchProjects({ baseUrl: BASE, fetchImpl });
+    expect(fetchImpl.mock.calls[0][1]?.headers).not.toHaveProperty("authorization");
+    expect(fetchImpl.mock.calls[0][1]).toMatchObject({ credentials: "omit" });
+  });
+
+  it("ends the session on 401 and tells the app", async () => {
+    saveSession({ accessToken: TOKEN, username: "alice", expiresAt: Date.now() + 3_600_000 });
+    const listener = vi.fn();
+    window.addEventListener(SIGNED_OUT_EVENT, listener);
+    const body = { error: { code: "invalid_token", message: "x", request_id: "r" } };
+    const error = await failure(fetchProjects({ baseUrl: BASE, fetchImpl: respond(body, { status: 401 }) }));
+    window.removeEventListener(SIGNED_OUT_EVENT, listener);
+    expect(error).toMatchObject({ kind: "unauthorized", status: 401, code: "invalid_token" });
+    expect(error.message).toBe("Your session has ended. Sign in again.");
+    expect(readSession()).toBeNull();
+    expect(listener).toHaveBeenCalledOnce();
+  });
+
+  it("asks the dev token route without sending any existing token", async () => {
+    saveSession({ accessToken: TOKEN, username: "alice", expiresAt: Date.now() + 3_600_000 });
+    const fetchImpl = respond({ access_token: "a".repeat(40), token_type: "Bearer", expires_in: 3600 });
+    const result = await requestLocalToken("bob", { baseUrl: BASE, fetchImpl });
+    expect(result.expires_in).toBe(3600);
+    const [url, init] = fetchImpl.mock.calls[0];
+    expect(url).toBe(`${BASE}/dev/token`);
+    expect(init?.headers).not.toHaveProperty("authorization");
+    expect(JSON.parse(String(init?.body))).toEqual({ username: "bob" });
   });
 });

@@ -4,6 +4,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Request, Response
 
+from threatlens_api.auth import CurrentUser, User
 from threatlens_api.drafting import Drafter, DraftError
 from threatlens_api.errors import ApiError
 from threatlens_api.models import Strict
@@ -12,7 +13,6 @@ from threatlens_api.threats import Threat, ThreatDraft, ThreatModel, ThreatModel
 
 log = logging.getLogger("threatlens")
 
-# Auth and per-user ownership arrive on day 12; until then this API is local-only.
 router = APIRouter(prefix="/threat-models", tags=["threat models"])
 
 DRAFT_ERRORS = {
@@ -35,19 +35,21 @@ def _store(request: Request) -> ThreatModelStore:
 
 
 @router.post("", status_code=201)
-async def create_threat_model(body: ThreatModelCreate, request: Request) -> ThreatModel:
-    return _store(request).create(body)
+async def create_threat_model(
+    body: ThreatModelCreate, user: CurrentUser, request: Request
+) -> ThreatModel:
+    return _store(request).create(user.id, body)
 
 
 @router.get("/{model_id}")
-async def get_threat_model(model_id: UUID, request: Request) -> ThreatModel:
-    return _store(request).get(model_id)
+async def get_threat_model(model_id: UUID, user: CurrentUser, request: Request) -> ThreatModel:
+    return _store(request).get(user.id, model_id)
 
 
 @router.post("/{model_id}/draft")
-async def draft_threats(model_id: UUID, request: Request) -> DraftResponse:
+async def draft_threats(model_id: UUID, user: CurrentUser, request: Request) -> DraftResponse:
     store = _store(request)
-    model = store.get(model_id)
+    model = store.get(user.id, model_id)
     drafter = request.app.state.drafter
     if drafter is None:
         raise ApiError(503, "llm_disabled", "Threat drafting is turned off on this server")
@@ -59,18 +61,18 @@ async def draft_threats(model_id: UUID, request: Request) -> DraftResponse:
         raise ApiError(409, "draft_in_progress", "A draft for this model is already running")
     in_progress.add(model_id)
     try:
-        return await _draft(store, model, drafter, request)
+        return await _draft(store, user, model, drafter, request)
     finally:
         in_progress.discard(model_id)
 
 
 async def _draft(
-    store: ThreatModelStore, model: ThreatModel, drafter: Drafter, request: Request
+    store: ThreatModelStore, user: User, model: ThreatModel, drafter: Drafter, request: Request
 ) -> DraftResponse:
     model_id = model.id
 
     # Counted before the call: a failed call can still be billed.
-    wait = request.app.state.draft_budget.take()
+    wait = request.app.state.draft_budget.take(user.id)
     if wait is not None:
         raise ApiError(
             429,
@@ -88,27 +90,31 @@ async def _draft(
         headers = {"Retry-After": "60"} if e.kind == "rate_limited" else None
         raise ApiError(status, code, message, headers=headers) from e
 
-    added = store.replace_drafts(model_id, result.threats, drafter.model_name)
+    added = store.replace_drafts(user.id, model_id, result.threats, drafter.model_name)
     return DraftResponse(
-        model=store.get(model_id),
+        model=store.get(user.id, model_id),
         added=added,
         dropped=result.dropped + len(result.threats) - added,
     )
 
 
 @router.post("/{model_id}/threats", status_code=201)
-async def add_threat(model_id: UUID, body: ThreatDraft, request: Request) -> Threat:
-    return _store(request).add_threat(model_id, body)
+async def add_threat(
+    model_id: UUID, body: ThreatDraft, user: CurrentUser, request: Request
+) -> Threat:
+    return _store(request).add_threat(user.id, model_id, body)
 
 
 @router.patch("/{model_id}/threats/{threat_id}")
 async def update_threat(
-    model_id: UUID, threat_id: UUID, body: ThreatUpdate, request: Request
+    model_id: UUID, threat_id: UUID, body: ThreatUpdate, user: CurrentUser, request: Request
 ) -> Threat:
-    return _store(request).update_threat(model_id, threat_id, body)
+    return _store(request).update_threat(user.id, model_id, threat_id, body)
 
 
 @router.delete("/{model_id}/threats/{threat_id}", status_code=204)
-async def delete_threat(model_id: UUID, threat_id: UUID, request: Request) -> Response:
-    _store(request).delete_threat(model_id, threat_id)
+async def delete_threat(
+    model_id: UUID, threat_id: UUID, user: CurrentUser, request: Request
+) -> Response:
+    _store(request).delete_threat(user.id, model_id, threat_id)
     return Response(status_code=204)

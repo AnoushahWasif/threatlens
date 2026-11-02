@@ -4,6 +4,11 @@ from pydantic import ValidationError
 from threatlens_api.settings import Settings
 
 GOOD_KEY = "k" * 32
+COGNITO = {
+    "auth_mode": "cognito",
+    "cognito_region": "eu-west-2",
+    "cognito_user_pool_id": "eu-west-2_AbC123",
+}
 
 
 def prod(**overrides):
@@ -11,6 +16,7 @@ def prod(**overrides):
         "environment": "prod",
         "cors_origins": ["https://threatlens.example.com"],
         "llm_api_key": GOOD_KEY,
+        **COGNITO,
     }
     return Settings(**{**values, **overrides}, _env_file=None)
 
@@ -79,3 +85,35 @@ def test_reads_from_env(monkeypatch):
 
 def test_secret_not_in_repr():
     assert GOOD_KEY not in repr(prod())
+
+
+def test_prod_refuses_the_local_token_issuer():
+    with pytest.raises(ValidationError, match="must be cognito in prod"):
+        prod(auth_mode="local")
+
+
+def test_cognito_needs_region_and_pool():
+    with pytest.raises(ValidationError, match="needs THREATLENS_COGNITO_REGION"):
+        Settings(auth_mode="cognito", _env_file=None)
+    with pytest.raises(ValidationError, match="not in THREATLENS_COGNITO_REGION"):
+        Settings(**{**COGNITO, "cognito_region": "us-east-1"}, _env_file=None)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("cognito_region", "eu-west-2/../x"),
+        ("cognito_user_pool_id", "eu-west-2_abc/../../evil"),
+        ("cognito_user_pool_id", "eu-west-2_abc.evil.example"),
+        ("auth_client_id", "abc def"),
+    ],
+)
+def test_rejects_values_that_would_change_the_issuer_url(field, value):
+    with pytest.raises(ValidationError):
+        Settings(**{**COGNITO, field: value}, _env_file=None)
+
+
+def test_issuer_url():
+    s = Settings(**COGNITO, _env_file=None)
+    assert s.auth_issuer == "https://cognito-idp.eu-west-2.amazonaws.com/eu-west-2_AbC123"
+    assert Settings(_env_file=None).auth_issuer == "threatlens-local"

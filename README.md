@@ -45,7 +45,13 @@ docs/         architecture and threat model
 | `POST /threat-models/{id}/threats` | Add a threat by hand (stored as `accepted`) |
 | `PATCH` / `DELETE /threat-models/{id}/threats/{threat_id}` | Edit, accept, reject or remove a threat |
 
-Drafting is **off by default**, so the route answers `503 llm_disabled`. To turn it on, set `THREATLENS_LLM_PROVIDER=anthropic` and `THREATLENS_LLM_API_KEY` in `apps/api/.env`. Each draft is a paid API call, so the API allows 20 per hour (`THREATLENS_LLM_DRAFTS_PER_HOUR`). Re-drafting replaces only drafts nobody has touched. Threat models live in memory until persistence lands (day 13), and there's no auth yet (day 12), so don't expose this API.
+Drafting is **off by default**, so the route answers `503 llm_disabled`. To turn it on, set `THREATLENS_LLM_PROVIDER=anthropic` and `THREATLENS_LLM_API_KEY` in `apps/api/.env`. Each draft is a paid API call, so the API allows 20 per hour (`THREATLENS_LLM_DRAFTS_PER_HOUR`). Re-drafting replaces only drafts nobody has touched. Threat models live in memory until persistence lands (day 13).
+
+## Sign-in
+
+Every threat-model route needs a bearer access token, and each user sees only their own models: anyone else's reads as "not found". In production the tokens come from Amazon Cognito (hosted sign-in page, authorization code + PKCE). For local development the API runs a stand-in issuer: start it with the default `THREATLENS_AUTH_MODE=local`, open the web app, and sign in with any username. No password is checked, and the API refuses this mode when `THREATLENS_ENVIRONMENT=prod`.
+
+Limits: 50 threat models and 5 AI drafts an hour per user, and 20 drafts an hour for the whole API. The Cognito path is unit-tested against recorded-shape responses but hasn't run against a real user pool yet. The pool is created with Terraform on day 16.
 
 ## Architecture
 

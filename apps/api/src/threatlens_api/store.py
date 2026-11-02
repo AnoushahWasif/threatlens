@@ -15,6 +15,7 @@ from threatlens_api.threats import (
 )
 
 MAX_MODELS = 500
+MAX_MODELS_PER_USER = 50
 MAX_THREATS_PER_MODEL = 100
 TEXT_FIELDS = {"category", "title", "description", "mitigation", "component"}
 
@@ -24,31 +25,44 @@ def _key(t: ThreatDraft) -> tuple[str, str]:
 
 
 class ThreatModelStore:
-    def __init__(self, max_models: int = MAX_MODELS, max_threats: int = MAX_THREATS_PER_MODEL):
+    def __init__(
+        self,
+        max_models: int = MAX_MODELS,
+        max_threats: int = MAX_THREATS_PER_MODEL,
+        max_per_user: int = MAX_MODELS_PER_USER,
+    ):
         self._models: dict[UUID, ThreatModel] = {}
         self.max_models = max_models
         self.max_threats = max_threats
+        self.max_per_user = max_per_user
 
-    def create(self, data: ThreatModelCreate) -> ThreatModel:
+    def create(self, owner: str, data: ThreatModelCreate) -> ThreatModel:
+        if sum(m.owner_id == owner for m in self._models.values()) >= self.max_per_user:
+            raise ApiError(
+                409, "too_many_models", f"You can have {self.max_per_user} threat models"
+            )
         if len(self._models) >= self.max_models:
             raise ApiError(507, "storage_full", "No room for more threat models")
-        model = ThreatModel(**data.model_dump())
+        model = ThreatModel(**data.model_dump(), owner_id=owner)
         self._models[model.id] = model
         return model
 
-    def get(self, model_id: UUID) -> ThreatModel:
+    def get(self, owner: str, model_id: UUID) -> ThreatModel:
         model = self._models.get(model_id)
-        if model is None:
+        # Someone else's model looks exactly like a missing one, so ids can't be probed.
+        if model is None or model.owner_id != owner:
             raise ApiError(404, "not_found", "Threat model not found")
         return model
 
-    def replace_drafts(self, model_id: UUID, drafts: list[ThreatDraft], drafted_with: str) -> int:
+    def replace_drafts(
+        self, owner: str, model_id: UUID, drafts: list[ThreatDraft], drafted_with: str
+    ) -> int:
         """Swap untouched LLM drafts for new ones. Returns how many new drafts were added.
 
         Anything a person has accepted, rejected, edited or written stays, and a new draft
         that repeats one of those is skipped.
         """
-        model = self.get(model_id)
+        model = self.get(owner, model_id)
         kept = [
             t
             for t in model.threats
@@ -70,8 +84,8 @@ class ThreatModelStore:
         model.drafted_at = _now()
         return len(added)
 
-    def add_threat(self, model_id: UUID, draft: ThreatDraft) -> Threat:
-        model = self.get(model_id)
+    def add_threat(self, owner: str, model_id: UUID, draft: ThreatDraft) -> Threat:
+        model = self.get(owner, model_id)
         if len(model.threats) >= self.max_threats:
             raise ApiError(409, "too_many_threats", f"A model can hold {self.max_threats} threats")
         self._check_unique(model, draft)
@@ -82,8 +96,10 @@ class ThreatModelStore:
         model.threats.append(threat)
         return threat
 
-    def update_threat(self, model_id: UUID, threat_id: UUID, update: ThreatUpdate) -> Threat:
-        model = self.get(model_id)
+    def update_threat(
+        self, owner: str, model_id: UUID, threat_id: UUID, update: ThreatUpdate
+    ) -> Threat:
+        model = self.get(owner, model_id)
         index, threat = self._find(model, threat_id)
         changes = update.model_dump(exclude_unset=True)
         edited = threat.edited or any(
@@ -98,8 +114,8 @@ class ThreatModelStore:
         model.threats[index] = updated
         return updated
 
-    def delete_threat(self, model_id: UUID, threat_id: UUID) -> None:
-        model = self.get(model_id)
+    def delete_threat(self, owner: str, model_id: UUID, threat_id: UUID) -> None:
+        model = self.get(owner, model_id)
         index, _ = self._find(model, threat_id)
         del model.threats[index]
 

@@ -122,6 +122,11 @@ The first idea was `EPSS × weight × (2 if in KEV)`. On real numbers that left 
 | 23 | Server-side refusal fallback (`fallbacks: "default"`) is on | Threat modelling describes attacks, so a safety classifier can decline. The API then retries on its fallback model; if that also declines, the user gets "write the threats by hand" |
 | 24 | Threat-model page applies a change only after the API confirms it; ids go into a path only after a UUID check; error codes are read from an allow-list and the server's message is dropped (Day 11) | A reviewed threat model is a record. The screen must never show an accept the server didn't save |
 | 25 | Markdown export holds accepted threats only and escapes all threat text | The text came from a user or an LLM that read user input. Unescaped, it could add links or images (tracking pixels) when the file is rendered on GitHub |
+| 26 | The API checks every access token itself: RS256 only (checked before any key lookup), issuer, expiry with 30 s leeway, `token_use=access` and our `client_id`; the user id is the token's `sub` (Day 12) | API Gateway's JWT authorizer will check too, but the API must not depend on it: the local dev path has no gateway. Pinning RS256 stops `alg: none` and HS256-with-the-public-key forgeries. ID tokens and tokens for another app client of the same pool are refused |
+| 27 | Local dev uses a stand-in issuer inside the API (`POST /dev/token`, key made at startup and never stored). The settings refuse it in prod | Dev and prod run the same token checks, with no Cognito pool needed until Day 16 and no shared dev key to leak |
+| 28 | A threat model belongs to one user. Someone else's model gets the same 404 as a missing one. Caps per user (50 models, 5 drafts an hour) as well as overall | No id probing. One account can't fill the store or spend everyone's drafts |
+| 29 | Web sign-in: Cognito hosted UI with authorization code + PKCE (no client secret), one-time `state` checked and deleted on return, code removed from the address bar. Only the access token is kept, in `sessionStorage`; ID and refresh tokens are dropped. `?next=` must be a same-site path | A static site can't keep an httpOnly cookie, so the token is readable by script and the strict CSP (decision 14) is the XSS defence. Tab-only storage and no refresh token cap a stolen token at its one-hour life. A checked `next` stops open redirects |
+| 30 | Sign-in is skipped when no API is configured | The app then shows only labelled sample data, and there's nothing to protect |
 
 ## Threat model of ThreatLens (STRIDE)
 
@@ -129,7 +134,8 @@ Trust boundaries: browser ↔ API Gateway, API ↔ outside APIs (OSV, EPSS, KEV,
 
 | STRIDE | Threat | Mitigation |
 |--------|--------|------------|
-| **Spoofing** | Someone calls the API as another user | Cognito JWTs checked at API Gateway. The user id comes from the token, never from the request body |
+| **Spoofing** | Someone calls the API as another user | Cognito access tokens checked at API Gateway and again in the API (decision 26), with tests for expired, wrong-issuer, wrong-client, ID-token, `alg: none`, HS256 and tampered tokens. The user id comes from the token, never from the request body |
+| **Spoofing** | The sign-in callback is used to log a victim into the attacker's account (login CSRF), or `?next=` sends them to a look-alike site | One-time `state` per tab, checked before the code is exchanged, and PKCE. `next` accepts same-site paths only (decision 29) |
 | **Tampering** | A crafted SBOM/lockfile exploits the parser (huge file, deep nesting, zip bomb) | Size limit on the presigned upload, strict parsers with depth limits, the worker has no network access except the allow-listed APIs |
 | **Tampering** | Prompt injection in the architecture text changes the LLM's output | The text is wrapped in `<architecture>` tags (a closing tag inside it is defanged) and the system prompt says it's data, not instructions. The output must match a fixed schema and is validated again on our side. It's shown as a draft only and never executed or used to call tools. Injection can still bend *what* the draft says, which is why a person accepts each threat |
 | **Repudiation** | A user denies accepting or rejecting a threat | Every accept/reject is stored with the user id and a timestamp. API calls are logged to CloudWatch |

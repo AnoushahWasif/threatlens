@@ -1,3 +1,4 @@
+import { RequireAuth } from "@/components/auth-provider";
 import { ProjectsView } from "@/components/projects-view";
 
 export default function ProjectsPage() {
@@ -9,7 +10,9 @@ export default function ProjectsPage() {
           Each project is one codebase: its dependencies, findings and threat model.
         </p>
       </div>
-      <ProjectsView />
+      <RequireAuth>
+        <ProjectsView />
+      </RequireAuth>
     </section>
   );
 }

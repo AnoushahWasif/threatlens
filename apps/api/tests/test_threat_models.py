@@ -304,7 +304,7 @@ def test_second_draft_while_one_is_running_is_refused(app, client, new_model):
     # The guard is released afterwards, after a failure too.
     assert client.post(f"/threat-models/{model_id}/draft").status_code == 502
     assert app.state.drafts_in_progress == set()
-    assert len(store.get(UUID(model_id)).threats) == 1
+    assert len(store.get("local-alice", UUID(model_id)).threats) == 1
 
 
 @pytest.mark.parametrize(

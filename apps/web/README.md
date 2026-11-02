@@ -20,6 +20,7 @@ Security headers (CSP, HSTS, frame options) are not set here: a static export ha
 
 ## Pages
 
+- `/sign-in`, `/auth/callback`: sign-in (a username form against the API's local issuer in dev, Cognito's hosted page in prod). Every other page sends a signed-out visitor here and back. With no API configured there's nothing to sign in to, and the pages show labelled sample data.
 - `/`: project list.
 - `/findings?project=<id>`: summary and findings for one project.
   - Four headline numbers: findings, in CISA KEV, not scored, packages affected.

@@ -15,15 +15,35 @@ class Settings(BaseSettings):
     llm_provider: Literal["off", "anthropic"] = "off"
     llm_model: str = Field(default="claude-opus-5-5", pattern=r"^[a-z0-9][a-z0-9.\-]{1,63}$")
     llm_drafts_per_hour: int = Field(default=20, ge=1, le=1_000)
+    # Per user as well, so one account can't use up everyone's drafts.
+    llm_drafts_per_user_per_hour: int = Field(default=5, ge=1, le=1_000)
     max_request_bytes: int = 1_000_000
+
+    # "local" runs a stand-in token issuer in this process; prod must use Cognito.
+    auth_mode: Literal["local", "cognito"] = "local"
+    auth_client_id: str = Field(default="threatlens-local", pattern=r"^[A-Za-z0-9_-]{1,128}$")
+    cognito_region: str | None = Field(default=None, pattern=r"^[a-z]{2}(-[a-z]+)+-\d$")
+    cognito_user_pool_id: str | None = Field(
+        default=None, pattern=r"^[a-z]{2}(-[a-z]+)+-\d_[A-Za-z0-9]+$"
+    )
 
     @model_validator(mode="after")
     def check_prod_config(self) -> "Settings":
         # Fail at startup, not on the first request that needs the missing value.
         if self.llm_provider != "off" and not self._has_llm_key():
             raise ValueError("THREATLENS_LLM_API_KEY must be set when an LLM provider is on")
+        if self.auth_mode == "cognito":
+            if not (self.cognito_region and self.cognito_user_pool_id):
+                raise ValueError("Cognito auth needs THREATLENS_COGNITO_REGION and _USER_POOL_ID")
+            if not self.cognito_user_pool_id.startswith(f"{self.cognito_region}_"):
+                raise ValueError(
+                    "THREATLENS_COGNITO_USER_POOL_ID is not in THREATLENS_COGNITO_REGION"
+                )
         if self.environment != "prod":
             return self
+        if self.auth_mode != "cognito":
+            # The local issuer hands a token to anyone who asks for one.
+            raise ValueError("THREATLENS_AUTH_MODE must be cognito in prod")
         if "*" in self.cors_origins:
             raise ValueError("Wildcard CORS origin is not allowed in prod")
         if any(not o.startswith("https://") for o in self.cors_origins):
@@ -34,6 +54,14 @@ class Settings(BaseSettings):
 
     def _has_llm_key(self) -> bool:
         return self.llm_api_key is not None and len(self.llm_api_key.get_secret_value()) >= 20
+
+    @property
+    def auth_issuer(self) -> str:
+        if self.auth_mode == "local":
+            return "threatlens-local"
+        return (
+            f"https://cognito-idp.{self.cognito_region}.amazonaws.com/{self.cognito_user_pool_id}"
+        )
 
     @property
     def is_prod(self) -> bool:

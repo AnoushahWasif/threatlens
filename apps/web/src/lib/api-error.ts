@@ -1,4 +1,4 @@
-export type ApiErrorKind = "network" | "timeout" | "http" | "invalid" | "not-found";
+export type ApiErrorKind = "network" | "timeout" | "http" | "invalid" | "not-found" | "unauthorized";
 
 // Messages are fixed strings: nothing from the response is shown to the user.
 const MESSAGES: Record<ApiErrorKind, string> = {
@@ -7,10 +7,15 @@ const MESSAGES: Record<ApiErrorKind, string> = {
   http: "The ThreatLens API returned an error.",
   invalid: "The ThreatLens API sent data in an unexpected format.",
   "not-found": "That project doesn't exist, or you don't have access to it.",
+  unauthorized: "Your session has ended. Sign in again.",
 };
 
 // Error codes the UI reacts to. Anything else from the server is treated as a plain "http".
 export const KNOWN_CODES = [
+  "auth_required",
+  "invalid_token",
+  "auth_unavailable",
+  "too_many_models",
   "not_found",
   "validation_error",
   "payload_too_large",
