@@ -1,3 +1,4 @@
+import os
 from uuid import UUID
 
 import pytest
@@ -9,6 +10,7 @@ from threatlens_api.threats import ThreatDraft
 
 ARCH = "A Next.js web app calls a FastAPI API on Lambda, which stores projects in DynamoDB."
 MISSING = "00000000-0000-4000-8000-000000000000"
+DYNAMODB_URL = os.environ.get("THREATLENS_TEST_DYNAMODB_URL")
 
 
 def draft(title="Forged session token", category="spoofing"):
@@ -237,12 +239,18 @@ def test_threat_from_another_model_is_not_found(client, new_model):
     assert r.status_code == 404
 
 
-def test_limits_on_models_and_threats(app, client, new_model):
-    store = app.state.threat_models
-    store.max_models, store.max_threats = 1, 2
-    model_id = new_model()
+@pytest.mark.skipif(DYNAMODB_URL is not None, reason="the global cap is memory-store only")
+def test_memory_store_has_a_global_cap(app, client, new_model):
+    app.state.threat_models.repo.max_items = 1
+    new_model()
     r = client.post("/threat-models", json={"name": "x", "architecture": ARCH})
-    assert r.json()["error"]["code"] == "storage_full"
+    assert (r.status_code, r.json()["error"]["code"]) == (507, "storage_full")
+
+
+def test_limits_on_threats(app, client, new_model):
+    store = app.state.threat_models
+    store.max_threats = 2
+    model_id = new_model()
 
     for title in ("A", "B"):
         client.post(f"/threat-models/{model_id}/threats", json=draft(title).model_dump())
@@ -292,7 +300,7 @@ def test_second_draft_while_one_is_running_is_refused(app, client, new_model):
                 )
             return await super().draft(architecture)
 
-    slow = Slow([draft("A")], [draft("B")], DraftError("upstream"))
+    slow = Slow([draft("A")], [draft("B")], DraftError("upstream"), [draft("C")])
     app.state.drafter = slow
     assert client.post(f"/threat-models/{model_id}/draft").status_code == 200
     same, different = slow.nested
@@ -303,8 +311,8 @@ def test_second_draft_while_one_is_running_is_refused(app, client, new_model):
 
     # The guard is released afterwards, after a failure too.
     assert client.post(f"/threat-models/{model_id}/draft").status_code == 502
-    assert app.state.drafts_in_progress == set()
     assert len(store.get("local-alice", UUID(model_id)).threats) == 1
+    assert client.post(f"/threat-models/{model_id}/draft").status_code == 200
 
 
 @pytest.mark.parametrize(

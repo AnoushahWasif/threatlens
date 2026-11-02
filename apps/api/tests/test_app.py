@@ -103,6 +103,7 @@ def test_docs_on_in_dev_off_in_prod(client):
         auth_mode="cognito",
         cognito_region="eu-west-2",
         cognito_user_pool_id="eu-west-2_AbC123",
+        store="dynamodb",
         _env_file=None,
     )
     prod_client = TestClient(create_app(prod))
