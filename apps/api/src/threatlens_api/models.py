@@ -57,6 +57,8 @@ class ProjectCreate(Strict):
 
 class Project(ProjectCreate):
     id: UUID = Field(default_factory=uuid4)
+    # The Cognito `sub` of whoever created it. Never sent back in responses.
+    owner_id: str = Field(min_length=1, max_length=128, exclude=True)
     created_at: datetime = Field(default_factory=_now)
 
 

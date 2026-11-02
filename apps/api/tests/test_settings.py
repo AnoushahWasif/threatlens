@@ -16,6 +16,7 @@ def prod(**overrides):
         "environment": "prod",
         "cors_origins": ["https://threatlens.example.com"],
         "llm_api_key": GOOD_KEY,
+        "store": "dynamodb",
         **COGNITO,
     }
     return Settings(**{**values, **overrides}, _env_file=None)
@@ -117,3 +118,34 @@ def test_issuer_url():
     s = Settings(**COGNITO, _env_file=None)
     assert s.auth_issuer == "https://cognito-idp.eu-west-2.amazonaws.com/eu-west-2_AbC123"
     assert Settings(_env_file=None).auth_issuer == "threatlens-local"
+
+
+def test_prod_refuses_the_memory_store():
+    with pytest.raises(ValidationError, match="THREATLENS_STORE"):
+        prod(store="memory")
+
+
+def test_prod_refuses_a_dynamodb_local_endpoint():
+    with pytest.raises(ValidationError, match="DynamoDB Local"):
+        prod(dynamodb_endpoint_url="http://localhost:8000")
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "localhost:8000",
+        "ftp://localhost:8000",
+        "http://localhost:8000/x",
+        "http://a b",
+        "http://h?x",
+    ],
+)
+def test_dynamodb_endpoint_must_be_a_plain_url(url):
+    with pytest.raises(ValidationError):
+        Settings(dynamodb_endpoint_url=url, _env_file=None)
+
+
+@pytest.mark.parametrize("table", ["ab", "bad table", "x" * 256, "t;drop"])
+def test_dynamodb_table_name_is_checked(table):
+    with pytest.raises(ValidationError):
+        Settings(dynamodb_table=table, _env_file=None)

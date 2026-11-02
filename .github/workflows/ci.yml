@@ -20,8 +20,34 @@ jobs:
       - run: uv sync
       - run: uv run ruff check .
       - run: uv run ruff format --check .
-      # Exit code 5 means "no tests collected"; allowed until the first tests land on Day 3.
-      - run: uv run pytest || [ $? -eq 5 ]
+      - run: uv run pytest
+
+  # The same API tests against the real DynamoDB engine, not the moto fake: condition
+  # expressions, transactions and reserved words behave exactly as in AWS.
+  api-dynamodb:
+    runs-on: ubuntu-latest
+    services:
+      dynamodb:
+        image: amazon/dynamodb-local:3.3.1
+        ports:
+          - 8000:8000
+    env:
+      THREATLENS_TEST_DYNAMODB_URL: http://localhost:8000
+    defaults:
+      run:
+        working-directory: apps/api
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync
+      - name: Wait for DynamoDB Local
+        run: |
+          for i in $(seq 30); do
+            curl -s -o /dev/null http://localhost:8000 && exit 0
+            sleep 1
+          done
+          exit 1
+      - run: uv run pytest
 
   web:
     runs-on: ubuntu-latest

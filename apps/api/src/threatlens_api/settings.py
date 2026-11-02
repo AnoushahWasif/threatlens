@@ -27,6 +27,13 @@ class Settings(BaseSettings):
         default=None, pattern=r"^[a-z]{2}(-[a-z]+)+-\d_[A-Za-z0-9]+$"
     )
 
+    # "memory" loses everything on restart and only works with one process: dev and tests.
+    store: Literal["memory", "dynamodb"] = "memory"
+    dynamodb_table: str = Field(default="threatlens", pattern=r"^[A-Za-z0-9_.-]{3,255}$")
+    # Only for DynamoDB Local. Unset in AWS, where boto3 picks the regional endpoint.
+    dynamodb_endpoint_url: str | None = Field(default=None, pattern=r"^https?://[^\s/?#]+/?$")
+    aws_region: str = Field(default="eu-west-2", pattern=r"^[a-z]{2}(-[a-z]+)+-\d$")
+
     @model_validator(mode="after")
     def check_prod_config(self) -> "Settings":
         # Fail at startup, not on the first request that needs the missing value.
@@ -44,6 +51,10 @@ class Settings(BaseSettings):
         if self.auth_mode != "cognito":
             # The local issuer hands a token to anyone who asks for one.
             raise ValueError("THREATLENS_AUTH_MODE must be cognito in prod")
+        if self.store != "dynamodb":
+            raise ValueError("THREATLENS_STORE must be dynamodb in prod")
+        if self.dynamodb_endpoint_url is not None:
+            raise ValueError("THREATLENS_DYNAMODB_ENDPOINT_URL is for DynamoDB Local, not prod")
         if "*" in self.cors_origins:
             raise ValueError("Wildcard CORS origin is not allowed in prod")
         if any(not o.startswith("https://") for o in self.cors_origins):
