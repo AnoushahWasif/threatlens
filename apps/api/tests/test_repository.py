@@ -644,3 +644,69 @@ def test_latest_scan_only_moves_forward_and_needs_the_project(repo):
     assert repo.latest_scan("alice", orphan.project_id) is None
     # And the project itself still reads back fine with the pointer on it.
     assert repo.get_project("alice", project.id) == project
+
+
+# --- review of #24 -------------------------------------------------------------------------
+
+
+def test_budget_check_uses_nothing():
+    budget = WriteBudget(per_user=10, now=Clock())
+    budget.check("alice", 10)
+    budget.check("alice", 10)
+    budget.take("alice", 10)
+    with pytest.raises(ApiError):
+        budget.check("alice", 1)
+    assert budget._totals == {"alice": 10}
+    budget.check("bob", 5)
+    assert "bob" not in budget._used  # a check leaves no entry behind
+
+
+def test_update_is_charged_at_the_larger_of_before_and_after(repo):
+    budget = WriteBudget(per_user=100_000)
+    store = ThreatModelStore(repo, budget=budget)
+    m = store.create("alice", ThreatModelCreate(name="x", architecture=ARCH))
+    for i in range(20):
+        store.add_threat(
+            "alice", m.id, ThreatDraft(category="tampering", title=f"T{i}", description="d" * 900)
+        )
+    big = write_units(store.get("alice", m.id))
+    spent = budget._totals["alice"]
+    victim = store.get("alice", m.id).threats[0]
+    store.delete_threat("alice", m.id, victim.id)
+    # The item got smaller, but DynamoDB bills the update at its old size.
+    assert budget._totals["alice"] - spent == big
+
+
+def test_idle_users_are_swept_at_most_once_a_minute():
+    clock = Clock()
+    budget = WriteBudget(per_user=10, now=clock)
+    for i in range(10_001):
+        budget.take(f"user-{i}", 1)  # all active, so a sweep removes no one
+    budget.take("x", 1)
+    first = budget._last_sweep
+    assert first == clock.now
+    clock.now += 30
+    budget.take("y", 1)  # still over 10,000 users, but swept 30 s ago: no new scan
+    assert budget._last_sweep == first
+    clock.now += 31
+    budget.take("z", 1)
+    assert budget._last_sweep == clock.now
+
+
+def test_draft_refused_before_the_paid_call_when_its_result_could_not_be_saved(app, client):
+    calls = []
+
+    class Drafter:
+        model_name = "fake"
+
+        async def draft(self, architecture):
+            calls.append(1)
+            raise AssertionError("must not be called")
+
+    app.state.drafter = Drafter()
+    model_id = client.post("/threat-models", json={"name": "x", "architecture": ARCH}).json()["id"]
+    app.state.threat_models.budget.per_user = 30  # the model itself fits, a draft wouldn't
+    r = client.post(f"/threat-models/{model_id}/draft")
+    assert (r.status_code, r.json()["error"]["code"]) == (429, "write_limit")
+    assert calls == []
+    assert app.state.draft_budget.take("local-alice") is None  # no draft slot used either

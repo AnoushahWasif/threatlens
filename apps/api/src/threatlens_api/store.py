@@ -34,6 +34,8 @@ SAVE_ATTEMPTS = 3
 # so a lease only runs out early if the process holding it died.
 DRAFT_LEASE_SECONDS = 360
 TEXT_FIELDS = {"category", "title", "description", "mitigation", "component"}
+# Upper bound on what a draft adds: 25 threats at about 2.3 KB each at the field limits.
+DRAFT_WRITE_ALLOWANCE = 60
 
 T = TypeVar("T")
 
@@ -60,12 +62,24 @@ class WriteBudget:
         self._lock = threading.Lock()
         self._used: dict[str, deque[tuple[float, int]]] = {}
         self._totals: dict[str, int] = {}
+        self._last_sweep = float("-inf")
 
     def take(self, user_id: str, units: int) -> None:
+        """Use `units`, or raise 429 if they don't fit in this hour."""
+        self._check(user_id, units, use=True)
+
+    def check(self, user_id: str, units: int) -> None:
+        """Raise 429 if `units` wouldn't fit, without using any. For a check before a paid
+        call whose result is saved (and charged) later."""
+        self._check(user_id, units, use=False)
+
+    def _check(self, user_id: str, units: int, use: bool) -> None:
         now = self._now()
         with self._lock:
-            if len(self._used) > 10_000:
-                # Drop callers with nothing left in the window, so the dicts can't grow forever.
+            # Drop callers with nothing left in the window, so the dicts can't grow forever.
+            # At most once a minute: it's a scan over every tracked user.
+            if len(self._used) > 10_000 and now - self._last_sweep >= 60:
+                self._last_sweep = now
                 for k in [k for k, v in self._used.items() if now - v[-1][0] >= self.WINDOW]:
                     del self._used[k], self._totals[k]
             used = self._used.setdefault(user_id, deque())
@@ -83,8 +97,14 @@ class WriteBudget:
                     "Too many changes this hour",
                     headers={"Retry-After": str(max(1, math.ceil(wait)))},
                 )
-            used.append((now, units))
-            self._totals[user_id] = total + units
+            if use:
+                used.append((now, units))
+                total += units
+            if used:
+                self._totals[user_id] = total
+            else:
+                del self._used[user_id]
+                self._totals.pop(user_id, None)
 
 
 class ThreatModelStore:
@@ -100,13 +120,19 @@ class ThreatModelStore:
         self.max_per_user = max_per_user
         self.budget = budget
 
-    def _charge(self, owner: str, model: ThreatModel) -> None:
+    def _charge(self, owner: str, units: int) -> None:
         if self.budget is not None:
-            self.budget.take(owner, write_units(model))
+            self.budget.take(owner, units)
+
+    def check_room_to_draft(self, owner: str, model: ThreatModel) -> None:
+        """Before a paid LLM call: refuse now if saving its result would go over the write
+        budget, rather than paying for a draft that then can't be saved."""
+        if self.budget is not None:
+            self.budget.check(owner, write_units(model) + DRAFT_WRITE_ALLOWANCE)
 
     def create(self, owner: str, data: ThreatModelCreate) -> ThreatModel:
         model = ThreatModel(**data.model_dump(), owner_id=owner)
-        self._charge(owner, model)
+        self._charge(owner, write_units(model))
         self.repo.create_model(model, self.max_per_user)
         return model
 
@@ -126,9 +152,11 @@ class ThreatModelStore:
                 # Two writers that just clashed would usually clash again at once.
                 time.sleep(random.uniform(0.01, 0.05))  # noqa: S311 - timing jitter, not a secret
             model, version = self._load(owner, model_id)
+            before = write_units(model)
             result = change(model)
-            # Charged per attempt: DynamoDB bills a failed conditional write too.
-            self._charge(owner, model)
+            # DynamoDB bills an update at the larger of the item before and after, and bills
+            # a failed conditional write too, so this is charged on every attempt.
+            self._charge(owner, max(before, write_units(model)))
             try:
                 self.repo.save_model(model, version)
             except Conflict:
