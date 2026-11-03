@@ -29,7 +29,7 @@ Most scanners return hundreds of CVEs sorted by CVSS, and most of those will nev
 ```
 apps/api/     FastAPI service and scan worker (Python, uv)
 apps/web/     Next.js frontend (pnpm), from Day 7
-infra/        Terraform for AWS, from Day 15
+infra/        Terraform for AWS (written and checked, not applied yet)
 docs/         architecture and threat model
 ```
 

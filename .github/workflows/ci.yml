@@ -49,6 +49,52 @@ jobs:
           exit 1
       - run: uv run pytest
 
+  # Builds the Lambda zip and runs it in AWS's own Lambda Python image, so a wheel built for
+  # the wrong platform fails here and not after a deploy.
+  lambda-package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv run python scripts/package_lambda.py
+        working-directory: apps/api
+      - name: Smoke test in the Lambda Python 3.12 image
+        run: |
+          mkdir -p /tmp/task
+          unzip -q apps/api/build/api.zip -d /tmp/task
+          cp apps/api/scripts/lambda_smoke.py /tmp/smoke.py
+          docker run --rm             -v /tmp/task:/var/task:ro -v /tmp/smoke.py:/smoke.py:ro             -e PYTHONPATH=/var/task -e THREATLENS_ENVIRONMENT=test             --entrypoint /var/lang/bin/python3             public.ecr.aws/lambda/python:3.12 /smoke.py
+
+  infra:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.16.6
+          terraform_wrapper: false
+      # Offline only: no AWS credentials exist in CI, so nothing can be planned or applied.
+      - run: terraform -chdir=infra fmt -check -recursive
+      - run: terraform -chdir=infra init -backend=false -input=false
+      - run: terraform -chdir=infra validate
+      - uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: v0.64.0
+      - run: tflint --init
+        working-directory: infra
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - run: tflint --recursive --config "$PWD/.tflint.hcl"
+        working-directory: infra
+      - name: Trivy misconfiguration scan
+        run: >-
+          docker run --rm -v "$PWD:/src" -w /src aquasec/trivy:0.75.0
+          config --exit-code 1 --ignorefile .trivyignore.yaml --skip-dirs infra/.terraform infra
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: node --test "infra/**/*.test.mjs"
+
   web:
     runs-on: ubuntu-latest
     defaults:

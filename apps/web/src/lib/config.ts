@@ -3,12 +3,22 @@ const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 export class ConfigError extends Error {}
 
 /**
- * The API base URL, or null when none is set (the app then shows sample data).
+ * The API base URL (absolute, or a same-site path like "/api"), or null when none is set
+ * (the app then shows sample data).
  * NEXT_PUBLIC_ values are baked into the browser bundle, so this must never hold a secret.
  */
 export function apiBaseUrl(raw: string | undefined = process.env.NEXT_PUBLIC_API_URL): string | null {
   const value = raw?.trim();
   if (!value) return null;
+
+  // A path on this same site, e.g. "/api" when CloudFront serves the API too. Not "//x",
+  // which a browser reads as another host, and no "..".
+  if (value.startsWith("/")) {
+    if (!/^(\/[A-Za-z0-9_-]+)+\/*$/.test(value)) {
+      throw new ConfigError("NEXT_PUBLIC_API_URL path must look like /api");
+    }
+    return value.replace(/\/+$/, "");
+  }
 
   let url: URL;
   try {
