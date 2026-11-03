@@ -13,6 +13,9 @@ describe("apiBaseUrl", () => {
     ["https://abc.execute-api.eu-west-1.amazonaws.com/prod//", "https://abc.execute-api.eu-west-1.amazonaws.com/prod"],
     ["http://localhost:8000", "http://localhost:8000"],
     ["http://127.0.0.1:8000/", "http://127.0.0.1:8000"],
+    ["/api", "/api"],
+    ["/api/", "/api"],
+    ["/api/v1", "/api/v1"],
   ])("accepts %s", (raw, expected) => {
     expect(apiBaseUrl(raw)).toBe(expected);
   });
@@ -25,6 +28,13 @@ describe("apiBaseUrl", () => {
     "https://user:pass@api.threatlens.dev",
     "https://api.threatlens.dev/?debug=1",
     "https://api.threatlens.dev/#x",
+    "//evil.example/api",
+    "/",
+    "/api/../x",
+    "/api?x=1",
+    "/api#x",
+    "/a pi",
+    "/\\evil.example",
   ])("rejects %s", (raw) => {
     expect(() => apiBaseUrl(raw)).toThrow(ConfigError);
   });
