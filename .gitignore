@@ -11,3 +11,13 @@ __pycache__/
 .DS_Store
 .vscode/
 .idea/
+
+# Lambda package (apps/api/scripts/package_lambda.py)
+apps/api/build/
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+infra/**/*.auto.tfvars.json

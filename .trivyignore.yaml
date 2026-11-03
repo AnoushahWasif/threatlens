@@ -1,0 +1,21 @@
+# Accepted misconfiguration findings, each with a reason. Expiring ones come back as
+# failures on that date, so they can't be forgotten.
+misconfigurations:
+  - id: AWS-0017
+    statement: Log groups get a customer-managed KMS key on day 16, with the other keys.
+    expired_at: 2026-11-30
+  - id: AWS-0011
+    statement: >-
+      WAF costs about $5-10 a month and needs her approval. Until then, API Gateway
+      throttling, the app's per-user limits and the budget alarm cover abuse.
+  - id: AWS-0010
+    statement: CloudFront access logs come with observability (day 19).
+    expired_at: 2026-12-15
+  - id: AWS-0089
+    statement: >-
+      S3 server access logs for the web bucket add nothing over CloudFront logs: its only
+      reader is the distribution.
+  - id: AWS-0132
+    statement: >-
+      The web bucket holds the public site files; SSE-S3 is enough and a KMS key would need
+      CloudFront in its key policy for no gain. Uploads and findings use KMS (day 16).
