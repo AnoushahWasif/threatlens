@@ -56,6 +56,8 @@ class Scan(Strict):
     kev_available: bool = True
     kev_stale: bool = False
     attempts: int = Field(default=0, ge=0)
+    # Set when the scan is done: the findings file of the run that won.
+    findings_file: str | None = Field(default=None, max_length=300)
     error: str | None = Field(default=None, max_length=200)
     created_at: datetime = Field(default_factory=_now)
     started_at: datetime | None = None
@@ -70,8 +72,10 @@ def upload_key(scan: Scan) -> str:
     return f"uploads/{scan.owner_id}/{scan.project_id}/{scan.id}"
 
 
-def findings_key(owner: str, project_id: UUID, scan_id: UUID) -> str:
-    return f"findings/{owner}/{project_id}/{scan_id}.json"
+def findings_key(scan: "Scan") -> str:
+    # One file per attempt: a slow run that lost its scan to a takeover can't overwrite the
+    # file the winning run's record points to.
+    return f"findings/{scan.owner_id}/{scan.project_id}/{scan.id}-{scan.attempts}.json"
 
 
 # --- files ---------------------------------------------------------------------------

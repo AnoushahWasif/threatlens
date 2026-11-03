@@ -21,7 +21,6 @@ from threatlens_api.scans import (
     ScanMessage,
     ScanStatus,
     SqsQueue,
-    findings_key,
     parse_message,
     upload_key,
 )
@@ -189,7 +188,9 @@ def test_a_scan_that_cant_be_queued_says_failed_not_queued(app, client, project)
 def test_a_lost_findings_file_is_an_error_not_an_empty_list(app, client, project, scanning):
     scan = upload(client, project).json()
     scanning.run()
-    app.state.blobs._data.pop(findings_key("local-alice", project, scan["id"]))
+    done = client.get(f"/projects/{project}/scans/{scan['id']}").json()
+    assert done["findings_file"].endswith(f"{scan['id']}-1.json")
+    app.state.blobs._data.pop(done["findings_file"])
     assert client.get(f"/projects/{project}/findings").status_code == 500
 
 
@@ -447,3 +448,42 @@ def test_a_scan_whose_worker_died_three_times_is_given_up(setup):
     clock.now += SCAN_TIMEOUT + timedelta(seconds=1)
     worker.handle(message)
     assert (stored(repo, message).status, calls) == (ScanStatus.FAILED, [])
+
+
+def test_a_slow_run_that_lost_its_scan_cannot_replace_the_winners_findings(setup):
+    """Review of #26: the first worker runs past SCAN_TIMEOUT, a second one takes over and
+    finishes, then the first finishes too. Both write a findings file; the record and
+    /findings must agree on the winner's."""
+    repo, blobs, clock, worker, message, _ = setup
+    takeover = Worker(repo, blobs, fake_pipeline(), clock=clock)
+
+    def slow_then_stale(project_id, deps):
+        clock.now += SCAN_TIMEOUT + timedelta(seconds=1)
+        takeover.handle(message)  # attempt 2 wins and saves
+        return fake_pipeline(unchecked=1)(project_id, deps)  # different answer, too late
+
+    worker.pipeline = slow_then_stale
+    worker.handle(message)
+
+    scan = stored(repo, message)
+    assert (scan.status, scan.attempts, scan.unchecked) == (ScanStatus.DONE, 2, 0)
+    assert scan.findings_file.endswith("-2.json")
+    assert blobs.get(scan.findings_file) is not None
+    assert repo.latest_scan("alice", message.project_id) == message.scan_id
+
+
+def test_lambda_skips_a_record_without_a_message_id(setup):
+    _, _, _, worker, message, _ = setup
+
+    def boom(project_id, deps):
+        raise RuntimeError("boom")
+
+    worker.pipeline = boom
+    handler = lambda_handler_for(worker)
+    event = {
+        "Records": [
+            {"body": message.model_dump_json()},  # no messageId
+            {"messageId": "m2", "body": message.model_dump_json()},
+        ]
+    }
+    assert handler(event) == {"batchItemFailures": [{"itemIdentifier": "m2"}]}

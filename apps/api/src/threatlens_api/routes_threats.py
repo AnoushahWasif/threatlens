@@ -71,6 +71,9 @@ async def _draft(
 ) -> DraftResponse:
     model_id = model.id
 
+    # Before anything is spent: a draft whose result couldn't be saved is money wasted.
+    await run_in_threadpool(store.check_room_to_draft, user.id, model)
+
     # Counted before the call: a failed call can still be billed.
     wait = request.app.state.draft_budget.take(user.id)
     if wait is not None:

@@ -134,10 +134,8 @@ class Worker:
             return
 
         result = self.pipeline(scan.project_id, parsed.dependencies)
-        self.blobs.put(
-            findings_key(scan.owner_id, scan.project_id, scan.id),
-            FindingList.dump_json(result.findings),
-        )
+        scan.findings_file = findings_key(scan)
+        self.blobs.put(scan.findings_file, FindingList.dump_json(result.findings))
         scan.status = ScanStatus.DONE
         scan.findings = len(result.findings)
         scan.unchecked = len(result.unchecked)
@@ -165,13 +163,15 @@ def lambda_handler_for(worker: Worker):
         failures = []
         for record in event.get("Records", []):
             message = parse_message(record.get("body", ""))
-            if message is None:
+            message_id = record.get("messageId")
+            if message is None or not message_id:
+                # Not ours, so retrying it can't help. Skip it, not the whole batch.
                 log.warning("dropped a message that isn't a scan")
                 continue
             try:
                 worker.handle(message)
             except Exception:
-                failures.append({"itemIdentifier": record["messageId"]})
+                failures.append({"itemIdentifier": message_id})
         return {"batchItemFailures": failures}
 
     return handler

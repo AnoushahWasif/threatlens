@@ -17,7 +17,6 @@ from threatlens_api.scans import (
     ScanMessage,
     ScanStatus,
     SkippedRef,
-    findings_key,
     upload_key,
 )
 from threatlens_api.worker import FindingList
@@ -107,7 +106,10 @@ def list_findings(project_id: UUID, user: CurrentUser, request: Request) -> list
     scan_id = state.repo.latest_scan(user.id, project_id)
     if scan_id is None:
         return []
-    data = state.blobs.get(findings_key(user.id, project_id, scan_id))
+    found = state.repo.load_scan(user.id, project_id, scan_id)
+    # The file the record names, so the findings always match the counts on the record.
+    name = found[0].findings_file if found is not None else None
+    data = state.blobs.get(name) if name else None
     if data is None:
         log.error("findings file missing for a finished scan", extra={"scan_id": str(scan_id)})
         raise RuntimeError("findings file missing")
