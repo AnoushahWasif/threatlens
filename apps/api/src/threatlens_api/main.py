@@ -2,6 +2,7 @@ import logging
 import uuid
 from contextlib import asynccontextmanager
 
+import boto3
 from fastapi import FastAPI, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
@@ -11,7 +12,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from threatlens_api import __version__
 from threatlens_api.auth import JwksKeys, LocalIssuer, TokenVerifier, dev_router
-from threatlens_api.drafting import ClaudeDrafter, Drafter
+from threatlens_api.drafting import ClaudeDrafter, Drafter, SecretKeyDrafter
 from threatlens_api.errors import ApiError
 from threatlens_api.limits import HourlyBudget
 from threatlens_api.repository import create_table
@@ -157,9 +158,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     return app
 
 
-def make_drafter(settings: Settings) -> Drafter | None:
-    if settings.llm_provider == "anthropic" and settings.llm_api_key is not None:
+def make_drafter(settings: Settings, secrets_client=None) -> Drafter | None:
+    if settings.llm_provider != "anthropic":
+        return None
+    if settings.llm_api_key is not None:
         return ClaudeDrafter(settings.llm_api_key.get_secret_value(), settings.llm_model)
+    if settings.llm_api_key_secret_id is not None:
+        client = secrets_client or boto3.client("secretsmanager", region_name=settings.aws_region)
+        return SecretKeyDrafter(settings.llm_api_key_secret_id, settings.llm_model, client)
     return None
 
 

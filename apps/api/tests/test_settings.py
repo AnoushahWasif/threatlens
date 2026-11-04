@@ -4,6 +4,7 @@ from pydantic import ValidationError
 from threatlens_api.settings import Settings
 
 GOOD_KEY = "k" * 32
+SECRET_ARN = "arn:aws:secretsmanager:eu-west-2:123456789012:secret:threatlens/llm-AbCdEf"
 COGNITO = {
     "auth_mode": "cognito",
     "cognito_region": "eu-west-2",
@@ -15,7 +16,7 @@ def prod(**overrides):
     values = {
         "environment": "prod",
         "cors_origins": ["https://threatlens.example.com"],
-        "llm_api_key": GOOD_KEY,
+        "llm_api_key_secret_id": SECRET_ARN,
         "store": "dynamodb",
         "scan_queue_url": "https://sqs.eu-west-2.amazonaws.com/123456789012/threatlens-scans",
         "uploads_bucket": "threatlens-uploads",
@@ -34,14 +35,33 @@ def test_valid_prod_config():
     assert prod().is_prod
 
 
-def test_prod_requires_llm_key():
-    with pytest.raises(ValidationError, match="LLM_API_KEY"):
-        prod(llm_api_key=None)
+def test_prod_refuses_the_llm_key_itself_in_the_environment():
+    with pytest.raises(ValidationError, match="isn't allowed in prod"):
+        prod(llm_api_key=GOOD_KEY)
 
 
-def test_prod_rejects_short_key():
-    with pytest.raises(ValidationError, match="LLM_API_KEY"):
-        prod(llm_api_key="short")
+def test_prod_runs_with_drafting_off_and_no_key():
+    assert prod(llm_api_key_secret_id=None).llm_provider == "off"
+
+
+def test_prod_drafting_needs_the_secret():
+    assert prod(llm_provider="anthropic").llm_api_key_secret_id == SECRET_ARN
+    with pytest.raises(ValidationError, match="SECRET_ID"):
+        prod(llm_provider="anthropic", llm_api_key_secret_id=None)
+
+
+@pytest.mark.parametrize(
+    "arn",
+    [
+        "threatlens/llm-key",
+        "arn:aws:s3:::bucket",
+        "arn:aws:secretsmanager:eu-west-2:123:secret:x",
+        "arn:aws:secretsmanager:eu-west-2:123456789012:secret:a b",
+    ],
+)
+def test_secret_id_must_be_a_secrets_manager_arn(arn):
+    with pytest.raises(ValidationError):
+        Settings(llm_api_key_secret_id=arn, _env_file=None)
 
 
 def test_llm_is_off_by_default():

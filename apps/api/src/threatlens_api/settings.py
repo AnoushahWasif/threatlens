@@ -11,6 +11,12 @@ class Settings(BaseSettings):
     environment: Literal["dev", "test", "prod"] = "dev"
     cors_origins: list[str] = ["http://localhost:3000"]
     llm_api_key: SecretStr | None = None
+    # In AWS the key lives in Secrets Manager and only its ARN is configured (prod refuses
+    # the key itself in an environment variable, where it would show in the console).
+    llm_api_key_secret_id: str | None = Field(
+        default=None,
+        pattern=r"^arn:aws:secretsmanager:[a-z0-9-]+:\d{12}:secret:[A-Za-z0-9/_+=.@-]{1,512}$",
+    )
     # Off by default: no key, no outbound calls, no cost until someone turns it on.
     llm_provider: Literal["off", "anthropic"] = "off"
     llm_model: str = Field(default="claude-opus-5-5", pattern=r"^[a-z0-9][a-z0-9.\-]{1,63}$")
@@ -47,8 +53,11 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def check_prod_config(self) -> "Settings":
         # Fail at startup, not on the first request that needs the missing value.
-        if self.llm_provider != "off" and not self._has_llm_key():
-            raise ValueError("THREATLENS_LLM_API_KEY must be set when an LLM provider is on")
+        if self.llm_provider != "off" and not (self._has_llm_key() or self.llm_api_key_secret_id):
+            raise ValueError(
+                "THREATLENS_LLM_API_KEY or _LLM_API_KEY_SECRET_ID must be set when an LLM "
+                "provider is on"
+            )
         if self.auth_mode == "cognito":
             if not (self.cognito_region and self.cognito_user_pool_id):
                 raise ValueError("Cognito auth needs THREATLENS_COGNITO_REGION and _USER_POOL_ID")
@@ -71,8 +80,10 @@ class Settings(BaseSettings):
             raise ValueError("Wildcard CORS origin is not allowed in prod")
         if any(not o.startswith("https://") for o in self.cors_origins):
             raise ValueError("CORS origins must use https in prod")
-        if not self._has_llm_key():
-            raise ValueError("THREATLENS_LLM_API_KEY must be set in prod")
+        if self.llm_api_key is not None:
+            raise ValueError(
+                "THREATLENS_LLM_API_KEY isn't allowed in prod; use _LLM_API_KEY_SECRET_ID"
+            )
         return self
 
     def _has_llm_key(self) -> bool:

@@ -99,7 +99,7 @@ def test_docs_on_in_dev_off_in_prod(client):
     prod = Settings(
         environment="prod",
         cors_origins=["https://threatlens.example.com"],
-        llm_api_key="k" * 32,
+        llm_api_key_secret_id="arn:aws:secretsmanager:eu-west-2:123456789012:secret:threatlens/llm-key-AbCdEf",
         auth_mode="cognito",
         cognito_region="eu-west-2",
         cognito_user_pool_id="eu-west-2_AbC123",
