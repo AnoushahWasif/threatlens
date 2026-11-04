@@ -51,7 +51,7 @@ Drafting is **off by default**, so the route answers `503 llm_disabled`. To turn
 
 Every threat-model route needs a bearer access token, and each user sees only their own models: anyone else's reads as "not found". In production the tokens come from Amazon Cognito (hosted sign-in page, authorization code + PKCE). For local development the API runs a stand-in issuer: start it with the default `THREATLENS_AUTH_MODE=local`, open the web app, and sign in with any username. No password is checked, and the API refuses this mode when `THREATLENS_ENVIRONMENT=prod`.
 
-Limits: 50 threat models and 5 AI drafts an hour per user, and 20 drafts an hour for the whole API. The Cognito path is unit-tested against recorded-shape responses but hasn't run against a real user pool yet. The pool is created with Terraform on day 16.
+Limits: 50 threat models and 5 AI drafts an hour per user, and 20 drafts an hour for the whole API. The Cognito path is unit-tested against recorded-shape responses but hasn't run against a real user pool yet. The pool is defined in Terraform (`infra/modules/auth`, not applied yet) with admin-created accounts only, so nobody can sign up on their own.
 
 ## Storage
 
