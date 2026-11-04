@@ -216,3 +216,69 @@ def test_budget_allows_up_to_the_limit_then_says_how_long_to_wait():
     clock[0] += 3000
     assert budget.take() is None  # the first one has aged out
     assert budget.take() is not None
+
+
+# --- the LLM key from Secrets Manager ---------------------------------------------------------
+
+
+class FakeSecrets:
+    def __init__(self, *answers):
+        self.answers = list(answers)
+        self.calls = 0
+
+    def get_secret_value(self, SecretId):  # noqa: N803 - boto3's own argument name
+        self.calls += 1
+        answer = self.answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return {"SecretString": answer}
+
+
+SECRET = "arn:aws:secretsmanager:eu-west-2:123456789012:secret:llm-AbCdEf"
+
+
+def test_key_is_read_on_first_draft_once_and_kept(monkeypatch):
+    from threatlens_api import drafting
+
+    made = []
+
+    class Fake:
+        def __init__(self, key, model):
+            made.append(key)
+
+        async def draft(self, architecture):
+            return drafting.DraftResult([])
+
+    monkeypatch.setattr(drafting, "ClaudeDrafter", Fake)
+    secrets = FakeSecrets("sk-" + "x" * 40)
+    d = drafting.SecretKeyDrafter(SECRET, "claude-opus-5-5", secrets)
+    assert secrets.calls == 0  # nothing read at startup
+
+    async def twice():
+        await asyncio.gather(d.draft(ARCH), d.draft(ARCH))
+
+    asyncio.run(twice())
+    assert (secrets.calls, made) == (1, ["sk-" + "x" * 40])
+
+
+@pytest.mark.parametrize(
+    "answer", [RuntimeError("AccessDenied for arn:..."), "", "too-short", None]
+)
+def test_an_unreadable_or_empty_key_is_a_draft_error_not_a_crash(answer, caplog):
+    from threatlens_api.drafting import DraftError, SecretKeyDrafter
+
+    secrets = FakeSecrets(answer)
+    d = SecretKeyDrafter(SECRET, "claude-opus-5-5", secrets)
+    with pytest.raises(DraftError) as e:
+        asyncio.run(d.draft(ARCH))
+    assert e.value.kind == "upstream"
+    assert "AccessDenied" not in caplog.text  # the error's text isn't logged
+
+
+def test_make_drafter_uses_the_secret_when_no_key_is_set():
+    from threatlens_api.drafting import SecretKeyDrafter
+    from threatlens_api.main import make_drafter
+    from threatlens_api.settings import Settings
+
+    settings = Settings(llm_provider="anthropic", llm_api_key_secret_id=SECRET, _env_file=None)
+    assert isinstance(make_drafter(settings, secrets_client=FakeSecrets()), SecretKeyDrafter)

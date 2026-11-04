@@ -4,6 +4,7 @@ The output is only ever a draft: it is stored as threats with status "draft" and
 counts until a person accepts it (ARCHITECTURE.md decision 3).
 """
 
+import asyncio
 import json
 import logging
 import re
@@ -115,6 +116,40 @@ class Drafter(Protocol):
     model_name: str
 
     async def draft(self, architecture: str) -> DraftResult: ...
+
+
+class SecretKeyDrafter:
+    """A ClaudeDrafter whose key is read from Secrets Manager on the first draft, then kept.
+
+    Not at startup: if Secrets Manager is briefly unreachable, only drafting fails (and can
+    be retried), not every route of the API.
+    """
+
+    def __init__(self, secret_id: str, model: str, secrets_client):
+        self.model_name = model
+        self._secret_id = secret_id
+        self._secrets = secrets_client
+        self._inner: ClaudeDrafter | None = None
+        self._lock = asyncio.Lock()
+
+    def _read_key(self) -> str:
+        try:
+            key = self._secrets.get_secret_value(SecretId=self._secret_id).get("SecretString")
+        except Exception as e:
+            # Log the kind only: an error message here could quote the secret's name or more.
+            log.warning("couldn't read the LLM key", extra={"error": type(e).__name__})
+            raise DraftError("upstream", "LLM key unavailable") from e
+        if not isinstance(key, str) or len(key.strip()) < 20:
+            log.error("the LLM key secret is empty or too short")
+            raise DraftError("upstream", "LLM key not set")
+        return key.strip()
+
+    async def draft(self, architecture: str) -> DraftResult:
+        async with self._lock:
+            if self._inner is None:
+                key = await asyncio.to_thread(self._read_key)
+                self._inner = ClaudeDrafter(key, self.model_name)
+        return await self._inner.draft(architecture)
 
 
 class ClaudeDrafter:
