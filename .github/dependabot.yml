@@ -1,0 +1,45 @@
+version: 2
+
+# Weekly, minor and patch bumps grouped into one PR per ecosystem. A release has to be a
+# week old before it's proposed: hijacked packages are usually caught and pulled within days.
+# Security updates are separate (turned on in the repo settings) and skip the wait.
+updates:
+  - package-ecosystem: uv
+    directory: /apps/api
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      python:
+        update-types: [minor, patch]
+
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      npm:
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        update-types: [minor, patch]
+
+  - package-ecosystem: terraform
+    directories: [/infra, /infra/modules/*]
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      terraform:
+        update-types: [minor, patch]
