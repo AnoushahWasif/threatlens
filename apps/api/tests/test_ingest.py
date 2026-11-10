@@ -3,7 +3,8 @@ import json
 import pytest
 
 from threatlens_api import ingest
-from threatlens_api.ingest import IngestError, parse, parse_purl
+from threatlens_api.ingest import IngestError, parse, parse_cyclonedx, parse_purl, to_cyclonedx
+from threatlens_api.models import Dependency, Ecosystem
 
 
 def names(result):
@@ -219,3 +220,51 @@ def test_long_skipped_refs_are_truncated():
 def test_path_in_filename_is_ignored():
     result = parse("uploads/../../requirements.txt", b"requests==2.31.0\n")
     assert len(result.dependencies) == 1
+
+
+# --- snapshots (to_cyclonedx) ---------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "dep",
+    [
+        Dependency(name="jinja2", version="2.10", ecosystem=Ecosystem.PYPI),
+        Dependency(name="@next/env", version="16.4.3", ecosystem=Ecosystem.NPM, direct=False),
+        Dependency(name="left-pad", version="1.3.0-rc.1+build.5", ecosystem=Ecosystem.NPM),
+        Dependency(
+            name="org.apache.logging.log4j:log4j-core", version="2.14.1", ecosystem=Ecosystem.MAVEN
+        ),
+        Dependency(name="github.com/gin-gonic/gin", version="v1.9.0", ecosystem=Ecosystem.GO),
+        Dependency(name="serde", version="1.0.0", ecosystem=Ecosystem.CARGO),
+        Dependency(name="Newtonsoft.Json", version="13.0.1", ecosystem=Ecosystem.NUGET),
+        Dependency(name="pkg", version="1:2.0~beta^3", ecosystem=Ecosystem.PYPI),
+    ],
+)
+def test_a_snapshot_reads_back_as_the_same_dependency(dep):
+    parsed = parse("repo.cdx.json", to_cyclonedx([dep]))
+    assert parsed.dependencies == [dep]
+    assert parsed.skipped == []
+
+
+def test_an_empty_snapshot_reads_back_empty():
+    parsed = parse("repo.cdx.json", to_cyclonedx([]))
+    assert parsed.dependencies == [] and parsed.format == "CycloneDX"
+
+
+@pytest.mark.parametrize(
+    ("props", "direct"),
+    [
+        (None, True),
+        ("nope", True),
+        ([{"name": "threatlens:direct", "value": "false"}], False),
+        ([{"name": "threatlens:direct", "value": "true"}], True),
+        ([{"name": "other", "value": "false"}], True),
+        (["junk", {"name": "threatlens:direct", "value": "false"}], False),
+    ],
+)
+def test_direct_flag_property(props, direct):
+    comp = {"type": "library", "name": "x", "purl": "pkg:npm/x@1.0.0"}
+    if props is not None:
+        comp["properties"] = props
+    parsed = parse_cyclonedx({"bomFormat": "CycloneDX", "components": [comp]})
+    assert parsed.dependencies[0].direct is direct
