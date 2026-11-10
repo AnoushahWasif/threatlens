@@ -106,6 +106,7 @@ def test_docs_on_in_dev_off_in_prod(client):
         store="dynamodb",
         scan_queue_url="https://sqs.eu-west-2.amazonaws.com/123456789012/threatlens-scans",
         uploads_bucket="threatlens-uploads",
+        log_format="json",
         _env_file=None,
     )
     prod_client = TestClient(create_app(prod))
