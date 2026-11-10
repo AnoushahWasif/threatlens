@@ -178,6 +178,7 @@ The first idea was `EPSS × weight × (2 if in KEV)`. On real numbers that left 
 | 64 | CI writes a CycloneDX SBOM of what ships (no dev tools) and runs ThreatLens's own parser on it | The SBOM is the evidence for "what's in it". Parsing it ourselves catches a change in Trivy's output, or a parser bug, before a user's upload does |
 | 65 | Every GitHub Action pinned to a commit; Dependabot proposes updates weekly once a release is 7 days old; security updates go straight through | A tag can be moved to malicious code after review (as in the tj-actions incident), a commit can't. Hijacked releases are usually pulled within days |
 | 66 | The shadcn CLI is not a dependency; its one CSS file is copied in with its licence | It was only needed for that file, and it brought about 100 packages, including an unfixable deepmerge advisory (GHSA-gcqx-w48m-w2h4), into the app's tree |
+| 72 | pnpm override: typescript-eslint's minimatch pinned to 11.0.4 (GHSA-g3hv-75wg-m249, fixed in 11.0.1; 10.x has no fix) | Found by ThreatLens scanning its own lockfile. typescript-eslint itself moves to minimatch 11 in 8.72.3, so far only in alphas; 11.0.4 is the newest release over a week old. Remove the override once a stable typescript-eslint has it. ESLint checked still reporting TypeScript errors with it |
 
 ## Threat model of ThreatLens (STRIDE)
 
