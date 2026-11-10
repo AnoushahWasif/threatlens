@@ -49,6 +49,9 @@ class Settings(BaseSettings):
     scans_per_hour: int = Field(default=200, ge=1, le=100_000)
     scans_per_user_per_hour: int = Field(default=10, ge=1, le=10_000)
     aws_region: str = Field(default="eu-west-2", pattern=r"^[a-z]{2}(-[a-z]+)+-\d$")
+    # JSON in AWS, so CloudWatch can query fields; plain text is easier to read locally.
+    log_format: Literal["text", "json"] = "text"
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
 
     @model_validator(mode="after")
     def check_prod_config(self) -> "Settings":
@@ -76,6 +79,8 @@ class Settings(BaseSettings):
             raise ValueError("THREATLENS_SCAN_QUEUE_URL and _UPLOADS_BUCKET must be set in prod")
         if self.dynamodb_endpoint_url is not None:
             raise ValueError("THREATLENS_DYNAMODB_ENDPOINT_URL is for DynamoDB Local, not prod")
+        if self.log_format != "json":
+            raise ValueError("THREATLENS_LOG_FORMAT must be json in prod")
         if "*" in self.cors_origins:
             raise ValueError("Wildcard CORS origin is not allowed in prod")
         if any(not o.startswith("https://") for o in self.cors_origins):

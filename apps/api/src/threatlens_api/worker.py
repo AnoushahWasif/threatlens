@@ -16,7 +16,7 @@ from uuid import UUID
 
 from pydantic import TypeAdapter
 
-from threatlens_api import ingest
+from threatlens_api import ingest, logs
 from threatlens_api.epss import EpssClient
 from threatlens_api.kev import KevClient
 from threatlens_api.models import Dependency, Finding, _now
@@ -148,11 +148,29 @@ class Worker:
             # Too slow: the scan was taken over and the other worker's result stands.
             return
         self.repo.set_latest_scan(scan)
+        log.info("scan done", extra=_outcome(scan))
 
     def _fail(self, scan: Scan, version: int, error: str) -> None:
         scan.status, scan.error, scan.finished_at = ScanStatus.FAILED, error, self._clock()
         with contextlib.suppress(Conflict):
             self.repo.save_scan(scan, version)
+        # The error is the fixed, user-facing message, never file contents.
+        log.warning("scan failed", extra={**_outcome(scan), "reason": error})
+
+
+def _outcome(scan: Scan) -> dict:
+    took = None
+    if scan.started_at is not None and scan.finished_at is not None:
+        took = round((scan.finished_at - scan.started_at).total_seconds(), 1)
+    return {
+        "scan_id": str(scan.id),
+        "attempt": scan.attempts,
+        "dependencies": scan.dependencies,
+        "findings": scan.findings,
+        "unchecked": scan.unchecked,
+        "epss_failed": scan.epss_failed,
+        "seconds": took,
+    }
 
 
 def lambda_handler_for(worker: Worker):
@@ -226,6 +244,7 @@ def lambda_handler(event: dict, context=None) -> dict:
         from threatlens_api.wiring import make_blobs, make_repository
 
         settings = get_settings()
+        logs.configure(settings.log_format, settings.log_level)
         repo, _ = make_repository(settings)
         _handler = lambda_handler_for(Worker(repo, make_blobs(settings)))
     return _handler(event, context)
