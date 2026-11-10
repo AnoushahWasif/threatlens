@@ -74,7 +74,9 @@ curl -X POST "$API/projects/$PROJECT/scans?filename=requirements.txt" \
 # 202, scan "queued"; poll GET /projects/$PROJECT/scans/$SCAN, then GET /projects/$PROJECT/findings
 ```
 
-The API reads the file straight away (CycloneDX JSON, `requirements.txt` or `package-lock.json`, up to 1 MB) and refuses a bad one with a 422. The network part, OSV, EPSS and KEV, runs in a worker from a queue. On a real 4-line `requirements.txt` the upload answered in 0.22 s, and the scan finished 22 s later with 24 findings. A partial scan (OSV or EPSS couldn't answer for some packages) says so in its counts instead of looking clean. Locally the worker is a thread inside the API; in AWS it will be a Lambda fed by SQS (day 15). Limits: 10 scans per user per hour.
+The API reads the file straight away (CycloneDX JSON, `requirements.txt`, `package-lock.json`, `pnpm-lock.yaml` v6/v9, `uv.lock` or `poetry.lock`, up to 1 MB) and refuses a bad one with a 422. The network part, OSV, EPSS and KEV, runs in a worker from a queue. On a real 4-line `requirements.txt` the upload answered in 0.22 s, and the scan finished 22 s later with 24 findings. A partial scan (OSV or EPSS couldn't answer for some packages) says so in its counts instead of looking clean. Locally the worker is a thread inside the API; in AWS it will be a Lambda fed by SQS (day 15). Limits: 10 scans per user per hour.
+
+ThreatLens scanning its own lockfiles: `uv.lock` 55 packages, 0 findings in 3.1 s; `pnpm-lock.yaml` 729 packages, 2 findings in 3.6 s (deepmerge, removed on day 18, and minimatch 10.2.6 via typescript-eslint). Direct and transitive packages are told apart for `uv.lock`, `pnpm-lock.yaml` and `package-lock.json`; `poetry.lock` doesn't record it, so everything there counts as direct.
 
 ## Architecture
 
