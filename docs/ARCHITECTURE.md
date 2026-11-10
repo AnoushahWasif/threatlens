@@ -11,10 +11,10 @@ flowchart LR
     TL -->|CVE ids| EPSS[FIRST EPSS API]
     TL -->|daily catalogue| KEV[CISA KEV feed]
     TL -->|architecture text| LLM[LLM API]
-    TL -->|public repo lockfiles, later| GH[GitHub API]
+    TL -->|public repo lockfiles| GH[GitHub API + raw files]
 ```
 
-ThreatLens only reads from outside services. It never sends a user's code anywhere: only package names and versions go to OSV, CVE ids to EPSS, and the architecture description the user wrote to the LLM.
+ThreatLens only reads from outside services (including public GitHub repos, by name). It never sends a user's code anywhere: only package names and versions go to OSV, CVE ids to EPSS, and the architecture description the user wrote to the LLM.
 
 ## Containers
 
@@ -174,6 +174,10 @@ The first idea was `EPSS × weight × (2 if in KEV)`. On real numbers that left 
 | 60 | The LLM key lives in Secrets Manager, written by hand, read by the API on the first draft and kept; prod refuses the key in an environment variable | Never in the repo, Terraform state or the Lambda console. Reading it lazily means a Secrets Manager outage only breaks drafting |
 | 61 | Worker: 600 s timeout (under the 15-minute SCAN_TIMEOUT), batch size 1 with per-message failures, at most 2 running at once; queue visibility 6x the timeout, dead-letter queue after 5 receives (kept 14 days); uploads expire after 7 days | Polite to OSV, EPSS and KEV, a live scan is never taken over, and crashes the worker never saw end up somewhere to look at. Old dependency lists don't sit around |
 | 62 | The API Gateway resource lives in the root module, and a deploy applies twice (infra, then the CSP after the web build) | Breaks two loops: web needs the API's domain, auth needs the web URL, the API needs auth's client id; and the build needs auth's outputs while the CSP needs the build |
+| 67 | GitHub repo scans: the worker pins the default branch to a commit, reads the lockfiles there, and stores them merged as one CycloneDX snapshot in place of an upload | The API answers at once (API Gateway stops at 30 s). A retry scans the same commit without fetching again, and the snapshot reuses the upload path, parser and findings code unchanged |
+| 68 | A repo is accepted only as `owner/name` or `https://github.com/owner/name`; every URL is built from fixed hosts (api.github.com, raw.githubusercontent.com) and redirects aren't followed | The user names a repo, never a URL, so the worker can't be pointed at internal addresses (SSRF). A renamed repo answers with a redirect, which becomes a clear "use its current name" |
+| 69 | Two API calls per scan (commit, file tree), files by raw URL; no GitHub token yet. At most 20 files, 1 MB each, 5 MB in all; vendored folders skipped. Rate limit, not found, moved and empty fail at once with their own message; GitHub outages are retried | Without a token GitHub allows 60 API calls an hour per IP, so about 30 repo scans an hour per worker IP. A token in Secrets Manager is the fix if that's hit. The caps keep a monorepo from becoming a big download |
+| 70 | Snapshots keep each package's direct/transitive flag in a `threatlens:direct` component property, and the CycloneDX parser keeps file order | Findings say whether a package is yours to bump or comes through another one; file order makes results match what the user sees in their file |
 
 ## Threat model of ThreatLens (STRIDE)
 
@@ -199,3 +203,4 @@ Trust boundaries: browser ↔ API Gateway, API ↔ outside APIs (OSV, EPSS, KEV,
 | **Denial of service** | OSV/EPSS rate-limit or go down | Cache responses in DynamoDB with a TTL, back off and retry, and mark the scan "partial" instead of failing |
 | **Spoofing** | Someone calls the API at its execute-api URL, around CloudFront | The JWT authorizer and the app's own token check apply there too; only the CloudFront response headers are missing, and those only matter for pages, not JSON |
 | **Elevation of privilege** | A compromised Lambda reaches other AWS resources | One IAM role per function naming single resources (decision 56): the worker can't read the secret or send scans, the API can't read uploads back or consume the queue; the queue refuses senders other than the API (decision 57) |
+| **Tampering** | A repo scan is used to make the worker fetch an internal or attacker-chosen URL (SSRF), or a huge repo to tie it up | Only a repo name is accepted and checked against a strict pattern before anything is queued; hosts are fixed and redirects not followed; file count, size and tree size are capped, and sizes are counted while reading (decisions 68, 69) |

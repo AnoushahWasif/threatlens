@@ -18,6 +18,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 from pydantic import Field
 
 from threatlens_api.errors import ApiError
+from threatlens_api.github import REPO
 from threatlens_api.models import Strict, _now
 
 FILENAME = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$"
@@ -43,6 +44,9 @@ class Scan(Strict):
     owner_id: str = Field(min_length=1, max_length=128, exclude=True)
     filename: str = Field(pattern=FILENAME)
     format: str = Field(max_length=40)
+    # A GitHub scan: the worker fetches the repo's lockfiles and records the commit it read.
+    repo: str | None = Field(default=None, pattern=REPO)
+    commit: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
     status: ScanStatus = ScanStatus.QUEUED
     dependencies: int = Field(default=0, ge=0)
     # What the file listed but couldn't be checked (no exact version and so on): a count,
