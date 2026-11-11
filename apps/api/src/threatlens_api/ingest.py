@@ -103,14 +103,22 @@ def _load_toml(text: str) -> dict:
         raise IngestError("Invalid TOML") from exc
 
 
+class _NoAliasLoader(yaml.SafeLoader):
+    # pnpm never writes anchors or aliases. Allowing them lets a few hundred bytes of
+    # "<<: [*m, *m, ...]" merge keys copy pairs exponentially (107 s for 582 bytes).
+    def compose_node(self, parent, index):
+        if self.check_event(yaml.AliasEvent):
+            raise IngestError("YAML aliases (*name) are not allowed in a lockfile")
+        return super().compose_node(parent, index)
+
+
 def _load_yaml(text: str):
-    # Safe loader only: no Python objects. Aliases become shared references, not copies, so
-    # an "alias bomb" doesn't grow in memory, and nothing below walks deeper than 3 levels.
+    # Safe loader only: no Python objects, and no aliases (see _NoAliasLoader).
     # The pure-Python loader, not the 5x faster libyaml one: deep nesting (200 KB of "[",
     # or 3,000 levels of indents) overflows libyaml's C stack and kills the whole process,
     # where the Python one raises RecursionError.
     try:
-        return yaml.load(text, Loader=yaml.SafeLoader)  # noqa: S506 - a safe loader
+        return yaml.load(text, Loader=_NoAliasLoader)  # noqa: S506 - a safe loader
     except RecursionError as exc:
         raise IngestError("YAML is nested too deeply") from exc
     except yaml.YAMLError as exc:
@@ -225,7 +233,7 @@ def parse_uv_lock(data: dict) -> IngestResult:
     # The project itself (and any workspace members) are editable or virtual; whatever they
     # list, in any group, is a direct dependency.
     members = [p for p in packages if {"editable", "virtual"} & _dict(p.get("source")).keys()]
-    direct = set()
+    direct = set()  # a name, or (name, version) when the lockfile names the version
     for member in members:
         groups = [member.get("dependencies")]
         groups += list(_dict(member.get("optional-dependencies")).values())
@@ -233,7 +241,9 @@ def parse_uv_lock(data: dict) -> IngestResult:
         for group in groups:
             for dep in group if isinstance(group, list) else []:
                 if isinstance(dep, dict) and isinstance(dep.get("name"), str):
-                    direct.add(pypi_name(dep["name"]))
+                    name = pypi_name(dep["name"])
+                    ver = dep.get("version")
+                    direct.add((name, ver) if isinstance(ver, str) else name)
 
     for pkg in packages:
         if any(pkg is m for m in members):
@@ -248,7 +258,9 @@ def parse_uv_lock(data: dict) -> IngestResult:
         if not isinstance(version, str):
             result.skipped.append(Skipped(_short(name), "no version in lockfile"))
             continue
-        result.add(pypi_name(name), version, Ecosystem.PYPI, pypi_name(name) in direct, name)
+        name = pypi_name(name)
+        is_direct = name in direct or (name, version) in direct
+        result.add(name, version, Ecosystem.PYPI, is_direct, pkg["name"])
     return result
 
 
@@ -296,8 +308,14 @@ def parse_pnpm_lock(data) -> IngestResult:
         for section in ("dependencies", "devDependencies", "optionalDependencies"):
             for name, info in _dict(_dict(project).get(section)).items():
                 ver = info.get("version") if isinstance(info, dict) else info
-                if isinstance(name, str) and isinstance(ver, str):
-                    direct.add((name, _without_peers(ver)))
+                if not isinstance(name, str) or not isinstance(ver, str):
+                    continue
+                ver = _without_peers(ver).removeprefix("/")
+                # An npm alias ("string-width-cjs": npm:string-width@4) records the real
+                # package as its version: string-width@4.2.3 (v6: /string-width@4.2.3).
+                if "@" in ver:
+                    name, _, ver = ver.rpartition("@")
+                direct.add((name, ver))
 
     packages = data.get("packages")
     if packages is None:
@@ -306,6 +324,11 @@ def parse_pnpm_lock(data) -> IngestResult:
         raise IngestError("pnpm-lock.yaml packages must be a mapping")
     for key in packages:
         if not isinstance(key, str):
+            continue
+        # v6 writes registry packages as /name@version, and git or tarball ones as a host
+        # path like github.com/owner/repo/sha.
+        if version.startswith("6") and not key.startswith("/"):
+            result.skipped.append(Skipped(_short(key), "not from the npm registry"))
             continue
         spec = _without_peers(key.removeprefix("/"))
         name, sep, ver = spec.rpartition("@")

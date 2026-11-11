@@ -105,6 +105,39 @@ dependencies = [{ name = "werkzeug" }]
     assert not any(name in ("shop", "worker") for name, _, _ in deps(result))
 
 
+def test_uv_only_the_version_a_member_names_is_direct():
+    lock = b"""
+[[package]]
+name = "shop"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "numpy", version = "1.26.4", marker = "python_version < '3.12'" },
+    { name = "requests" },
+]
+
+[[package]]
+name = "numpy"
+version = "1.26.4"
+source = { registry = "x" }
+
+[[package]]
+name = "numpy"
+version = "2.1.0"
+source = { registry = "x" }
+
+[[package]]
+name = "requests"
+version = "2.32.3"
+source = { registry = "x" }
+"""
+    assert deps(parse("uv.lock", lock)) == {
+        ("numpy", "1.26.4", True),
+        ("numpy", "2.1.0", False),
+        ("requests", "2.32.3", True),
+    }
+
+
 def test_uv_two_versions_of_one_package_are_both_kept():
     lock = b"""
 [[package]]
@@ -379,15 +412,73 @@ def test_pnpm_without_packages_is_empty():
     assert result.dependencies == [] and result.skipped == []
 
 
-def test_pnpm_alias_bomb_stays_small():
-    # Nine levels of nine aliases would be 387 million strings if aliases were copied.
-    lines = [b"lockfileVersion: '9.0'", b'a0: &a0 ["x","x","x","x","x","x","x","x","x"]']
-    for i in range(1, 10):
-        ref = b",".join([b"*a%d" % (i - 1)] * 9)
-        lines.append(b"a%d: &a%d [%s]" % (i, i, ref))
-    lines.append(b"packages: {ok@1.0.0: {}}")
-    result = parse("pnpm-lock.yaml", b"\n".join(lines) + b"\n")
+def _alias_bomb(levels, merge):
+    keys = ", ".join(f"k{i}: 1" for i in range(10))
+    lines = ["lockfileVersion: '9.0'", f"m0: &m0 {{{keys}}}"]
+    for i in range(1, levels + 1):
+        refs = ", ".join([f"*m{i - 1}"] * 10)
+        lines.append(f"m{i}: &m{i} {{<<: [{refs}]}}" if merge else f"m{i}: &m{i} [{refs}]")
+    return ("\n".join(lines) + "\npackages: {ok@1.0.0: {}}\n").encode()
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        # Merge keys copy every merged pair: 5 levels took 0.9 s, 7 took 107 s, 8 runs out
+        # of memory. 5 here, so a regression fails fast instead of hanging the run.
+        pytest.param(_alias_bomb(5, merge=True), id="merge-keys"),
+        pytest.param(_alias_bomb(9, merge=False), id="sequences"),
+        pytest.param(b"lockfileVersion: '9.0'\na: &a 1\nb: *a\n", id="one-alias"),
+    ],
+)
+def test_pnpm_aliases_are_refused(data):
+    with pytest.raises(IngestError, match="aliases"):
+        parse("pnpm-lock.yaml", data)
+
+
+def test_pnpm_merge_key_without_aliases_still_loads():
+    data = b"lockfileVersion: '9.0'\nx: {<<: {a: 1}, b: 2}\npackages: {ok@1.0.0: {}}\n"
+    assert deps(parse("pnpm-lock.yaml", data)) == {("ok", "1.0.0", False)}
+
+
+def test_pnpm_npm_aliases_are_direct_under_the_real_name():
+    v9 = b"""lockfileVersion: '9.0'
+importers:
+  .:
+    dependencies:
+      string-width-cjs:
+        specifier: npm:string-width@^4.2.0
+        version: string-width@4.2.3
+      '@x/y-old': {specifier: 'npm:@x/y@1', version: '@x/y@1.0.0(react@19.0.0)'}
+packages:
+  string-width@4.2.3: {}
+  '@x/y@1.0.0': {}
+"""
+    v6 = b"""lockfileVersion: '6.0'
+dependencies:
+  string-width-cjs:
+    specifier: npm:string-width@^4.2.0
+    version: /string-width@4.2.3
+packages:
+  /string-width@4.2.3: {}
+"""
+    assert deps(parse("pnpm-lock.yaml", v9)) == {
+        ("string-width", "4.2.3", True),
+        ("@x/y", "1.0.0", True),
+    }
+    assert deps(parse("pnpm-lock.yaml", v6)) == {("string-width", "4.2.3", True)}
+
+
+def test_pnpm_v6_git_and_tarball_keys_are_not_from_the_registry():
+    data = b"""lockfileVersion: '6.0'
+packages:
+  github.com/octo/mylib/abc123: {}
+  registry.example.com/x/-/x-1.0.0.tgz: {}
+  /ok@1.0.0: {}
+"""
+    result = parse("pnpm-lock.yaml", data)
     assert deps(result) == {("ok", "1.0.0", False)}
+    assert {reason for _, reason in skipped(result)} == {"not from the npm registry"}
 
 
 # --- ThreatLens's own lockfiles -----------------------------------------------------------
