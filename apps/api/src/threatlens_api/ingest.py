@@ -7,9 +7,11 @@ UI can tell the user what wasn't checked instead of silently dropping it.
 
 import json
 import re
+import tomllib
 from dataclasses import dataclass, field
 from urllib.parse import unquote
 
+import yaml
 from pydantic import ValidationError
 
 from threatlens_api.models import Dependency, Ecosystem
@@ -67,12 +69,19 @@ def parse(filename: str, content: bytes) -> IngestResult:
         return parse_requirements(text)
     if name == "package-lock.json":
         return parse_package_lock(_load_json(text))
+    if name == "uv.lock":
+        return parse_uv_lock(_load_toml(text))
+    if name == "poetry.lock":
+        return parse_poetry_lock(_load_toml(text))
+    if name == "pnpm-lock.yaml":
+        return parse_pnpm_lock(_load_yaml(text))
     if name.endswith(".json"):
         data = _load_json(text)
         if isinstance(data, dict) and data.get("bomFormat") == "CycloneDX":
             return parse_cyclonedx(data)
     raise IngestError(
-        "Unsupported file. Upload a CycloneDX JSON SBOM, requirements.txt or package-lock.json"
+        "Unsupported file. Upload a CycloneDX JSON SBOM, requirements.txt, package-lock.json, "
+        "pnpm-lock.yaml, uv.lock or poetry.lock"
     )
 
 
@@ -83,6 +92,37 @@ def _load_json(text: str):
         raise IngestError("JSON is nested too deeply") from exc
     except json.JSONDecodeError as exc:
         raise IngestError(f"Invalid JSON at line {exc.lineno}") from exc
+
+
+def _load_toml(text: str) -> dict:
+    try:
+        return tomllib.loads(text)
+    except RecursionError as exc:
+        raise IngestError("TOML is nested too deeply") from exc
+    except tomllib.TOMLDecodeError as exc:
+        raise IngestError("Invalid TOML") from exc
+
+
+class _NoAliasLoader(yaml.SafeLoader):
+    # pnpm never writes anchors or aliases. Allowing them lets a few hundred bytes of
+    # "<<: [*m, *m, ...]" merge keys copy pairs exponentially (107 s for 582 bytes).
+    def compose_node(self, parent, index):
+        if self.check_event(yaml.AliasEvent):
+            raise IngestError("YAML aliases (*name) are not allowed in a lockfile")
+        return super().compose_node(parent, index)
+
+
+def _load_yaml(text: str):
+    # Safe loader only: no Python objects, and no aliases (see _NoAliasLoader).
+    # The pure-Python loader, not the 5x faster libyaml one: deep nesting (200 KB of "[",
+    # or 3,000 levels of indents) overflows libyaml's C stack and kills the whole process,
+    # where the Python one raises RecursionError.
+    try:
+        return yaml.load(text, Loader=_NoAliasLoader)  # noqa: S506 - a safe loader
+    except RecursionError as exc:
+        raise IngestError("YAML is nested too deeply") from exc
+    except yaml.YAMLError as exc:
+        raise IngestError("Invalid YAML") from exc
 
 
 # --- requirements.txt ---------------------------------------------------------------
@@ -168,6 +208,138 @@ def _walk_v1(deps: dict, result: IngestResult, depth: int) -> None:
         nested = info.get("dependencies")
         if isinstance(nested, dict):
             _walk_v1(nested, result, depth + 1)
+
+
+# --- uv.lock and poetry.lock ----------------------------------------------------------
+
+
+def _toml_packages(data: dict, fmt: str) -> list[dict]:
+    packages = data.get("package", [])
+    if not isinstance(packages, list):
+        raise IngestError(f"{fmt} has no [[package]] list")
+    return [p for p in packages if isinstance(p, dict)]
+
+
+def _dict(value) -> dict:
+    return value if isinstance(value, dict) else {}
+
+
+NOT_INDEXED = "not from a package index (git, path or URL)"
+
+
+def parse_uv_lock(data: dict) -> IngestResult:
+    result = IngestResult(format="uv.lock")
+    packages = _toml_packages(data, "uv.lock")
+    # The project itself (and any workspace members) are editable or virtual; whatever they
+    # list, in any group, is a direct dependency.
+    members = [p for p in packages if {"editable", "virtual"} & _dict(p.get("source")).keys()]
+    direct = set()  # a name, or (name, version) when the lockfile names the version
+    for member in members:
+        groups = [member.get("dependencies")]
+        groups += list(_dict(member.get("optional-dependencies")).values())
+        groups += list(_dict(member.get("dev-dependencies")).values())
+        for group in groups:
+            for dep in group if isinstance(group, list) else []:
+                if isinstance(dep, dict) and isinstance(dep.get("name"), str):
+                    name = pypi_name(dep["name"])
+                    ver = dep.get("version")
+                    direct.add((name, ver) if isinstance(ver, str) else name)
+
+    for pkg in packages:
+        if any(pkg is m for m in members):
+            continue
+        name, version = pkg.get("name"), pkg.get("version")
+        if not isinstance(name, str):
+            result.skipped.append(Skipped("[[package]]", "no package name"))
+            continue
+        if "registry" not in _dict(pkg.get("source")):
+            result.skipped.append(Skipped(_short(name), NOT_INDEXED))
+            continue
+        if not isinstance(version, str):
+            result.skipped.append(Skipped(_short(name), "no version in lockfile"))
+            continue
+        name = pypi_name(name)
+        is_direct = name in direct or (name, version) in direct
+        result.add(name, version, Ecosystem.PYPI, is_direct, pkg["name"])
+    return result
+
+
+def parse_poetry_lock(data: dict) -> IngestResult:
+    result = IngestResult(format="poetry.lock")
+    for pkg in _toml_packages(data, "poetry.lock"):
+        name, version = pkg.get("name"), pkg.get("version")
+        if not isinstance(name, str) or not isinstance(version, str):
+            result.skipped.append(Skipped(_short(str(name)), "no name or version in lockfile"))
+            continue
+        # No source table means PyPI; "legacy" is another package index. Git, directory,
+        # file and URL sources have no index version for OSV to look up.
+        source = pkg.get("source")
+        if isinstance(source, dict) and source.get("type") not in (None, "legacy"):
+            result.skipped.append(Skipped(_short(name), NOT_INDEXED))
+            continue
+        # poetry.lock doesn't say which packages are direct (pyproject.toml does), so as
+        # with a CycloneDX file that has no graph, every package counts as direct.
+        result.add(pypi_name(name), version, Ecosystem.PYPI, True, name)
+    return result
+
+
+# --- pnpm-lock.yaml -------------------------------------------------------------------
+
+
+def _without_peers(version: str) -> str:
+    # pnpm writes peer dependencies after the version: 16.4.3(react@19.3.0)(...)
+    return version.split("(", 1)[0]
+
+
+def parse_pnpm_lock(data) -> IngestResult:
+    if not isinstance(data, dict):
+        raise IngestError("pnpm-lock.yaml must be a YAML mapping")
+    version = str(data.get("lockfileVersion", ""))
+    if version.split(".")[0] not in ("6", "9"):
+        raise IngestError("Only pnpm lockfile versions 6 and 9 are supported (pnpm 8 and later)")
+    result = IngestResult(format="pnpm-lock.yaml")
+
+    # A workspace lists each project under importers; a single project lists its own
+    # dependencies at the top level.
+    importers = data.get("importers")
+    projects = list(_dict(importers).values()) if importers is not None else [data]
+    direct = set()
+    for project in projects:
+        for section in ("dependencies", "devDependencies", "optionalDependencies"):
+            for name, info in _dict(_dict(project).get(section)).items():
+                ver = info.get("version") if isinstance(info, dict) else info
+                if not isinstance(name, str) or not isinstance(ver, str):
+                    continue
+                ver = _without_peers(ver).removeprefix("/")
+                # An npm alias ("string-width-cjs": npm:string-width@4) records the real
+                # package as its version: string-width@4.2.3 (v6: /string-width@4.2.3).
+                if "@" in ver:
+                    name, _, ver = ver.rpartition("@")
+                direct.add((name, ver))
+
+    packages = data.get("packages")
+    if packages is None:
+        return result  # nothing installed
+    if not isinstance(packages, dict):
+        raise IngestError("pnpm-lock.yaml packages must be a mapping")
+    for key in packages:
+        if not isinstance(key, str):
+            continue
+        # v6 writes registry packages as /name@version, and git or tarball ones as a host
+        # path like github.com/owner/repo/sha.
+        if version.startswith("6") and not key.startswith("/"):
+            result.skipped.append(Skipped(_short(key), "not from the npm registry"))
+            continue
+        spec = _without_peers(key.removeprefix("/"))
+        name, sep, ver = spec.rpartition("@")
+        if not sep or not name or not ver:
+            result.skipped.append(Skipped(_short(key), "could not read package name and version"))
+            continue
+        if ":" in ver or "/" in ver:  # file:, link:, git and tarball URLs
+            result.skipped.append(Skipped(_short(key), "not from the npm registry"))
+            continue
+        result.add(name, ver, Ecosystem.NPM, (name, ver) in direct, key)
+    return result
 
 
 # --- CycloneDX ----------------------------------------------------------------------
