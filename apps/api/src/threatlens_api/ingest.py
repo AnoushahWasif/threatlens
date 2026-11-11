@@ -8,7 +8,7 @@ UI can tell the user what wasn't checked instead of silently dropping it.
 import json
 import re
 from dataclasses import dataclass, field
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
 from pydantic import ValidationError
 
@@ -211,17 +211,71 @@ def parse_cyclonedx(data: dict) -> IngestResult:
         raise IngestError("CycloneDX components must be a list")
 
     # Walk nested components without recursion, so a hostile file can't blow the stack.
-    stack = list(components)
+    # Reversed onto the stack so dependencies come out in file order.
+    stack = list(reversed(components))
     while stack:
         comp = stack.pop()
         if not isinstance(comp, dict):
             continue
-        stack.extend(c for c in comp.get("components") or [] if isinstance(c, dict))
+        nested = comp.get("components")
+        if isinstance(nested, list):
+            stack.extend(c for c in reversed(nested) if isinstance(c, dict))
         ref = str(comp.get("purl") or comp.get("name") or "component")
         parsed = parse_purl(comp["purl"]) if isinstance(comp.get("purl"), str) else None
         if parsed is None:
             result.skipped.append(Skipped(_short(ref), "no supported package URL (purl)"))
             continue
         ecosystem, name, version = parsed
-        result.add(name, version, ecosystem, True, ref)
+        result.add(name, version, ecosystem, _direct(comp), ref)
     return result
+
+
+# CycloneDX's own way to say "transitive" is the dependency graph. Our snapshots of a repo
+# (to_cyclonedx) keep what the lockfile said in a property instead; anything else is direct.
+_DIRECT = "threatlens:direct"
+
+
+def _direct(comp: dict) -> bool:
+    props = comp.get("properties")
+    if not isinstance(props, list):
+        return True
+    return not any(
+        isinstance(p, dict) and p.get("name") == _DIRECT and p.get("value") == "false"
+        for p in props
+    )
+
+
+_PURL_TYPE_OF = {ecosystem: purl_type for purl_type, ecosystem in _PURL_TYPES.items()}
+
+
+def to_purl(dep: Dependency) -> str:
+    """The inverse of parse_purl: parse_purl(to_purl(dep)) gives the same three values."""
+    if dep.ecosystem is Ecosystem.MAVEN and ":" in dep.name:
+        parts = dep.name.split(":", 1)
+    elif dep.ecosystem in (Ecosystem.NPM, Ecosystem.GO):
+        parts = dep.name.split("/")
+    else:
+        parts = [dep.name]
+    path = "/".join(quote(p, safe="") for p in parts)
+    return f"pkg:{_PURL_TYPE_OF[dep.ecosystem]}/{path}@{dep.version}"
+
+
+def to_cyclonedx(deps: list[Dependency]) -> bytes:
+    """A minimal CycloneDX 1.5 SBOM that parse() reads back as exactly these dependencies."""
+    return json.dumps(
+        {
+            "bomFormat": "CycloneDX",
+            "specVersion": "1.5",
+            "version": 1,
+            "components": [
+                {
+                    "type": "library",
+                    "name": d.name,
+                    "version": d.version,
+                    "purl": to_purl(d),
+                    "properties": [{"name": _DIRECT, "value": str(d.direct).lower()}],
+                }
+                for d in deps
+            ],
+        }
+    ).encode()
