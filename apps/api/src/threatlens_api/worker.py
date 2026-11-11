@@ -33,7 +33,8 @@ from threatlens_api.scans import (
     SkippedRef,
     findings_key,
     parse_message,
-    upload_key,
+    snapshot_key,
+    source_key,
 )
 
 # A scan still "running" after this is taken to be dead and is picked up again. The SQS
@@ -123,7 +124,9 @@ class Worker:
         version += 1
 
         try:
-            if scan.repo is not None and self.blobs.get(upload_key(scan)) is None:
+            # The commit is saved only after the snapshot is stored, so without one there
+            # is no usable snapshot yet (or its counts were lost): fetch again.
+            if scan.repo is not None and scan.commit is None:
                 version = self._snapshot(scan, version)
                 if version is None:
                     return
@@ -148,7 +151,7 @@ class Worker:
         except github.RepoError as e:
             self._fail(scan, version, str(e)[:200])
             return None
-        self.blobs.put(upload_key(scan), ingest.to_cyclonedx(snapshot.result.dependencies))
+        self.blobs.put(snapshot_key(scan), ingest.to_cyclonedx(snapshot.result.dependencies))
         scan.commit = snapshot.commit
         scan.dependencies = len(snapshot.result.dependencies)
         scan.skipped = len(snapshot.result.skipped)
@@ -163,9 +166,10 @@ class Worker:
         return version + 1
 
     def _run(self, scan: Scan, version: int) -> None:
-        data = self.blobs.get(upload_key(scan))
+        data = self.blobs.get(source_key(scan))
         if data is None:
-            self._fail(scan, version, "The uploaded file is no longer there. Upload it again")
+            again = "Scan the repository again" if scan.repo else "Upload it again"
+            self._fail(scan, version, f"The scanned file is no longer there. {again}")
             return
         try:
             parsed = ingest.parse(scan.filename, data)
