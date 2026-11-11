@@ -8,8 +8,15 @@ from threatlens_api.errors import ApiError
 from threatlens_api.github import GithubUnavailable, RepoError, Snapshot
 from threatlens_api.models import Dependency, Ecosystem, Project
 from threatlens_api.repository import Conflict, MemoryRepository
-from threatlens_api.scans import MemoryBlobs, Scan, ScanMessage, ScanStatus, upload_key
-from threatlens_api.worker import MAX_ATTEMPTS, Worker
+from threatlens_api.scans import (
+    MemoryBlobs,
+    Scan,
+    ScanMessage,
+    ScanStatus,
+    snapshot_key,
+    upload_key,
+)
+from threatlens_api.worker import MAX_ATTEMPTS, SCAN_TIMEOUT, Worker
 
 SHA = "c" * 40
 
@@ -164,7 +171,7 @@ def test_the_snapshot_is_stored_and_a_retry_does_not_fetch_again(setup):
     assert gh.calls == ["octo/shop"]  # fetched once
     assert stored(repo, message).status == ScanStatus.DONE
     assert calls[-1] == ["jinja2", "@next/env"]
-    parsed = ingest.parse("repo.cdx.json", blobs.get(upload_key(scan)))
+    parsed = ingest.parse("repo.cdx.json", blobs.get(snapshot_key(scan)))
     assert [(d.name, d.direct) for d in parsed.dependencies] == [
         ("jinja2", True),
         ("@next/env", False),
@@ -191,7 +198,7 @@ def test_a_repo_problem_fails_the_scan_at_once_with_its_message(setup):
     assert scan.status == ScanStatus.FAILED
     assert scan.error == "Repository not found, or it isn't public"
     assert scan.attempts == 1 and calls == []
-    assert blobs.get(upload_key(scan)) is None
+    assert blobs._data == {}
 
 
 def test_github_down_is_handed_back_then_given_up(setup):
@@ -249,7 +256,75 @@ def test_losing_the_scan_after_the_snapshot_leaves_it_to_the_winner(setup):
     worker.handle(message)
     assert calls == []  # didn't go on to scan
     # The snapshot is there for whoever took the scan over.
-    assert blobs.get(upload_key(stored(repo, message))) is not None
+    assert blobs.get(snapshot_key(stored(repo, message))) is not None
+
+
+def test_counts_lost_after_the_snapshot_are_fetched_again(setup):
+    # The snapshot is stored, then the worker dies before the commit and counts are saved
+    # (here: both that save and the hand-back fail), so a takeover finds no commit.
+    repo, blobs, worker, gh, message, calls = setup
+    real_save = repo.save_scan
+    saves = []
+
+    def save(scan, version):
+        saves.append(scan.status)
+        if len(saves) in (2, 3):
+            raise RuntimeError("dynamodb throttled")
+        return real_save(scan, version)
+
+    repo.save_scan = save
+    with pytest.raises(RuntimeError):
+        worker.handle(message)
+    assert stored(repo, message).commit is None
+    assert blobs.get(snapshot_key(stored(repo, message))) is not None
+    worker._clock.now += SCAN_TIMEOUT
+    worker.handle(message)
+    scan = stored(repo, message)
+    assert scan.status == ScanStatus.DONE and scan.commit == SHA
+    assert (scan.dependencies, scan.skipped, scan.findings) == (2, 1, 2)
+    assert len(gh.calls) == 2
+
+
+class S3LikeBlobs(MemoryBlobs):
+    """The worker's IAM policy (infra/modules/api/main.tf), as S3 enforces it: a denied
+    or missing key is a 403, which S3Blobs turns into a 503."""
+
+    READ = ("uploads/", "snapshots/")
+    WRITE = ("findings/", "snapshots/")
+
+    def put(self, key, data):
+        if not key.startswith(self.WRITE):
+            raise ApiError(503, "storage_unavailable", f"denied put {key}")
+        super().put(key, data)
+
+    def get(self, key):
+        data = super().get(key)
+        if not key.startswith(self.READ) or data is None:
+            raise ApiError(503, "storage_unavailable", f"denied get {key}")
+        return data
+
+
+def test_a_repo_scan_works_within_the_workers_permissions(setup):
+    repo, _, _, gh, message, calls = setup
+    blobs = S3LikeBlobs()
+    worker = Worker(repo, blobs, fake_pipeline(calls), clock=Clock(), github_client=gh)
+    worker.handle(message)
+    scan = stored(repo, message)
+    assert scan.status == ScanStatus.DONE and scan.commit == SHA
+    assert sorted(k.split("/")[0] for k in blobs._data) == ["findings", "snapshots"]
+
+
+def test_an_upload_scan_works_within_the_workers_permissions(setup):
+    repo, _, _, gh, _, calls = setup
+    blobs = S3LikeBlobs()
+    scan = Scan(
+        project_id=stored_project(repo), owner_id="alice", filename="requirements.txt", format="r"
+    )
+    blobs._data[upload_key(scan)] = b"jinja2==2.10\n"  # put there by the API
+    repo.create_scan(scan)
+    message = ScanMessage.for_scan(scan)
+    Worker(repo, blobs, fake_pipeline(calls), clock=Clock(), github_client=gh).handle(message)
+    assert stored(repo, message).status == ScanStatus.DONE
 
 
 def test_an_upload_scan_never_touches_github(setup):
@@ -274,8 +349,21 @@ def test_an_upload_scan_whose_file_is_gone_still_fails_as_before(setup):
     repo.create_scan(scan)
     message = ScanMessage.for_scan(scan)
     worker.handle(message)
-    assert "no longer there" in stored(repo, message).error
+    assert stored(repo, message).error == ("The scanned file is no longer there. Upload it again")
     assert gh.calls == []
+
+
+def test_a_repo_snapshot_gone_after_the_commit_was_saved_asks_for_a_new_scan(setup):
+    repo, blobs, worker, gh, message, calls = setup
+    worker.pipeline = fake_pipeline_failing_once(calls)
+    with pytest.raises(RuntimeError):
+        worker.handle(message)
+    blobs._data.clear()  # expired
+    worker.handle(message)
+    scan = stored(repo, message)
+    assert scan.status == ScanStatus.FAILED
+    assert scan.error == "The scanned file is no longer there. Scan the repository again"
+    assert gh.calls == ["octo/shop"]
 
 
 def test_dependency_fields_survive_as_the_pipeline_sees_them(setup):

@@ -25,6 +25,9 @@ MAX_FILE_BYTES = 1_000_000
 MAX_TOTAL_BYTES = 5_000_000
 # A tree of ~100,000 files is about 15 MB of JSON; GitHub truncates past that anyway.
 MAX_TREE_BYTES = 20_000_000
+# For the whole fetch. Each read has its own 15 s timeout, but ~22 requests with retries
+# could still run past the worker's 600 s, leaving the scan "running" until a takeover.
+DEADLINE_SECONDS = 240
 # Folders whose lockfiles belong to someone else's package, not to this project.
 SKIP_DIRS = {"node_modules", ".git", "site-packages", "vendor"}
 # Lockfiles the parser can't read yet, named in the error so "no files" isn't a mystery.
@@ -54,6 +57,10 @@ class RepoError(Exception):
 
 class GithubUnavailable(Exception):
     """GitHub is down or slow. The worker hands the scan back to be tried again."""
+
+
+class _TooLarge(Exception):
+    pass
 
 
 def parse_repo(text: str) -> str | None:
@@ -109,6 +116,8 @@ class GithubClient:
         max_retries: int = 2,
         backoff: float = 1.0,
         sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
+        deadline: float = DEADLINE_SECONDS,
     ):
         self.http = http or httpx.Client(
             timeout=httpx.Timeout(15.0, connect=5.0),
@@ -116,12 +125,14 @@ class GithubClient:
             headers={"user-agent": f"threatlens/{__version__}"},
         )
         self.max_retries, self.backoff, self.sleep = max_retries, backoff, sleep
+        self.clock, self.deadline = clock, deadline
 
     def snapshot(self, repo: str) -> Snapshot:
         if parse_repo(repo) != repo:
             raise RepoError("Not a GitHub repository name")
-        commit = self._commit(repo)
-        tree = self._tree(repo, commit)
+        ends = self.clock() + self.deadline
+        commit = self._commit(repo, ends)
+        tree = self._tree(repo, commit, ends)
 
         merged = ingest.IngestResult(format="GitHub repo")
         wanted = sorted(
@@ -152,7 +163,12 @@ class GithubClient:
             elif total + entry.size > MAX_TOTAL_BYTES:
                 merged.skipped.append(ingest.Skipped(entry.path, "over 5 MB of files"))
             else:
-                data = self._raw(repo, commit, entry.path)
+                try:
+                    data = self._raw(repo, commit, entry.path, ends)
+                except _TooLarge:
+                    # The tree said it was small enough; the file itself wasn't.
+                    merged.skipped.append(ingest.Skipped(entry.path, "file larger than 1 MB"))
+                    continue
                 total += len(data)
                 files.append(entry.path)
                 self._merge(merged, entry.path, data)
@@ -174,44 +190,68 @@ class GithubClient:
 
     # --- HTTP ----------------------------------------------------------------------------
 
-    def _commit(self, repo: str) -> str:
-        resp = self._get(
-            f"{API}/repos/{repo}/commits/HEAD", 1_000, {"accept": "application/vnd.github.sha"}
-        )
+    def _commit(self, repo: str, ends: float) -> str:
+        try:
+            resp = self._get(
+                f"{API}/repos/{repo}/commits/HEAD",
+                1_000,
+                {"accept": "application/vnd.github.sha"},
+                ends,
+            )
+        except _TooLarge as e:
+            raise GithubUnavailable("GitHub sent an unexpected commit id") from e
         sha = resp.strip().decode("ascii", "replace")
         if not _SHA.match(sha):
             raise GithubUnavailable("GitHub sent an unexpected commit id")
         return sha
 
-    def _tree(self, repo: str, commit: str) -> _Tree:
-        data = self._get(
-            f"{API}/repos/{repo}/git/trees/{commit}?recursive=1",
-            MAX_TREE_BYTES,
-            {"accept": "application/vnd.github+json"},
-        )
+    def _tree(self, repo: str, commit: str, ends: float) -> _Tree:
+        try:
+            data = self._get(
+                f"{API}/repos/{repo}/git/trees/{commit}?recursive=1",
+                MAX_TREE_BYTES,
+                {"accept": "application/vnd.github+json"},
+                ends,
+            )
+        except _TooLarge as e:
+            raise RepoError("The repository has too many files to list") from e
         try:
             return _Tree.model_validate_json(data)
         except ValidationError as e:
             raise GithubUnavailable("GitHub sent an unexpected file list") from e
 
-    def _raw(self, repo: str, commit: str, path: str) -> bytes:
-        return self._get(f"{RAW}/{repo}/{commit}/{quote(path)}", MAX_FILE_BYTES, {})
+    def _raw(self, repo: str, commit: str, path: str, ends: float) -> bytes:
+        return self._get(f"{RAW}/{repo}/{commit}/{quote(path)}", MAX_FILE_BYTES, {}, ends)
 
-    def _get(self, url: str, max_bytes: int, headers: dict) -> bytes:
+    def _get(self, url: str, max_bytes: int, headers: dict, ends: float) -> bytes:
         reason = "no attempt made"
         for attempt in range(self.max_retries + 1):
             if attempt:
                 self.sleep(self.backoff * 2 ** (attempt - 1))
+            self._check_deadline(ends)
             try:
                 with self.http.stream("GET", url, headers=headers) as resp:
                     if resp.status_code >= 500:
                         reason = f"HTTP {resp.status_code}"
                         continue
                     _check_status(resp)
-                    return _read_capped(resp, max_bytes)
+                    return self._read_capped(resp, max_bytes, ends)
             except httpx.TransportError as e:
                 reason = type(e).__name__
         raise GithubUnavailable(f"GitHub unavailable ({reason})")
+
+    def _check_deadline(self, ends: float) -> None:
+        if self.clock() > ends:
+            raise GithubUnavailable("GitHub is too slow right now")
+
+    def _read_capped(self, resp: httpx.Response, max_bytes: int, ends: float) -> bytes:
+        data = bytearray()
+        for chunk in resp.iter_bytes():
+            data += chunk
+            if len(data) > max_bytes:
+                raise _TooLarge()
+            self._check_deadline(ends)  # a server trickling bytes never hits the read timeout
+        return bytes(data)
 
 
 def _check_status(resp: httpx.Response) -> None:
@@ -224,15 +264,9 @@ def _check_status(resp: httpx.Response) -> None:
         raise RepoError("The repository has moved. Use its current name")
     if status == 409:
         raise RepoError("The repository is empty")
-    if status == 429 or (status == 403 and resp.headers.get("x-ratelimit-remaining") == "0"):
+    if status in (403, 429) and resp.headers.get("x-ratelimit-remaining") == "0":
         raise RepoError("GitHub's rate limit was reached. Try again in an hour")
+    # The secondary limit (too many requests at once) sends retry-after, with calls left.
+    if status == 429 or (status == 403 and "retry-after" in resp.headers):
+        raise RepoError("GitHub is limiting requests. Try again in a few minutes")
     raise RepoError(f"GitHub refused the request (HTTP {status})")
-
-
-def _read_capped(resp: httpx.Response, max_bytes: int) -> bytes:
-    data = bytearray()
-    for chunk in resp.iter_bytes():
-        data += chunk
-        if len(data) > max_bytes:
-            raise RepoError("A file is larger than allowed")
-    return bytes(data)

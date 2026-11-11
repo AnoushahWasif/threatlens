@@ -198,12 +198,74 @@ def test_total_size_is_capped(monkeypatch):
     ]
 
 
-def test_a_file_that_lies_about_its_size_is_cut_off():
-    fake = FakeGithub(
-        {"requirements.txt": b"a==1\n" * 300_000}, tree=[entry("requirements.txt", 10)]
-    )
-    with pytest.raises(RepoError, match="larger than allowed"):
+def test_a_file_that_lies_about_its_size_is_cut_off_and_skipped():
+    files = {"requirements.txt": b"a==1\n" * 300_000, "web/package-lock.json": LOCK}
+    fake = FakeGithub(files, tree=[entry("requirements.txt", 10), entry("web/package-lock.json")])
+    snap = client(fake).snapshot("octo/shop")
+    assert {d.name for d in snap.result.dependencies} == {"next", "@next/env"}
+    assert ("requirements.txt", "file larger than 1 MB") in [
+        (s.ref, s.reason) for s in snap.result.skipped
+    ]
+    assert snap.files == ["web/package-lock.json"]
+
+
+def test_a_file_list_too_large_to_read_says_so(monkeypatch):
+    monkeypatch.setattr(github, "MAX_TREE_BYTES", 1_000)
+    fake = FakeGithub(tree=[entry(f"src/file{i}.py") for i in range(50)])
+    with pytest.raises(RepoError, match="too many files to list"):
         client(fake).snapshot("octo/shop")
+
+
+def test_an_oversized_commit_answer_is_unexpected_not_a_crash():
+    fake = FakeGithub()
+    fake.override["https://api.github.com/repos/octo/shop/commits"] = httpx.Response(
+        200, text="a" * 5_000
+    )
+    with pytest.raises(GithubUnavailable, match="unexpected commit id"):
+        client(fake).snapshot("octo/shop")
+
+
+class Clock:
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+
+def test_the_whole_fetch_has_a_deadline():
+    clock = Clock()
+    fake = FakeGithub()
+
+    def slow_503(request):
+        clock.now += 150  # each attempt takes 150 s
+        return httpx.Response(503)
+
+    fake.override["https://raw.githubusercontent.com/"] = slow_503
+    http = httpx.Client(transport=httpx.MockTransport(fake), follow_redirects=False)
+    gh = GithubClient(http=http, sleep=lambda s: None, clock=clock, deadline=240)
+    with pytest.raises(GithubUnavailable, match="too slow"):
+        gh.snapshot("octo/shop")
+    # Attempts start at 0 s and 150 s; the third would start at 300 s, past 240.
+    assert len([r for r in fake.seen if r.url.host == "raw.githubusercontent.com"]) == 2
+
+
+def test_a_server_trickling_bytes_hits_the_deadline():
+    clock = Clock()
+
+    class Trickle(httpx.SyncByteStream):
+        def __iter__(self):
+            for _ in range(1_000):
+                clock.now += 1  # a byte a second never trips the 15 s read timeout
+                yield b"#"
+
+    fake = FakeGithub()
+    fake.override["https://raw.githubusercontent.com/"] = httpx.Response(200, stream=Trickle())
+    http = httpx.Client(transport=httpx.MockTransport(fake), follow_redirects=False)
+    gh = GithubClient(http=http, sleep=lambda s: None, clock=clock, deadline=240)
+    with pytest.raises(GithubUnavailable, match="too slow"):
+        gh.snapshot("octo/shop")
+    assert clock.now <= 242
 
 
 def test_a_bad_file_is_reported_and_the_rest_still_read():
@@ -267,8 +329,14 @@ def test_a_name_that_isnt_a_repo_never_reaches_the_network():
         (httpx.Response(404), "not found, or it isn't public"),
         (httpx.Response(301, headers={"location": "https://api.github.com/x"}), "has moved"),
         (httpx.Response(409), "is empty"),
-        (httpx.Response(403, headers={"x-ratelimit-remaining": "0"}), "rate limit"),
-        (httpx.Response(429), "rate limit"),
+        (httpx.Response(403, headers={"x-ratelimit-remaining": "0"}), "rate limit was reached"),
+        (httpx.Response(429, headers={"x-ratelimit-remaining": "0"}), "rate limit was reached"),
+        # Secondary limit: calls left, but too many at once.
+        (
+            httpx.Response(403, headers={"x-ratelimit-remaining": "41", "retry-after": "60"}),
+            "limiting requests. Try again in a few minutes",
+        ),
+        (httpx.Response(429), "limiting requests"),
         (httpx.Response(403), r"refused the request \(HTTP 403\)"),
     ],
 )

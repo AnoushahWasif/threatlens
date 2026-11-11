@@ -76,6 +76,17 @@ def upload_key(scan: Scan) -> str:
     return f"uploads/{scan.owner_id}/{scan.project_id}/{scan.id}"
 
 
+def snapshot_key(scan: Scan) -> str:
+    # Apart from uploads/, so the worker can write snapshots without being able to change
+    # what users uploaded.
+    return f"snapshots/{scan.owner_id}/{scan.project_id}/{scan.id}.cdx.json"
+
+
+def source_key(scan: Scan) -> str:
+    """Where the worker reads the scan's dependencies from."""
+    return snapshot_key(scan) if scan.repo is not None else upload_key(scan)
+
+
 def findings_key(scan: "Scan") -> str:
     # One file per attempt: a slow run that lost its scan to a takeover can't overwrite the
     # file the winning run's record points to.
