@@ -69,6 +69,19 @@ module "api" {
   environment            = var.api_environment
 }
 
+module "monitoring" {
+  source = "./modules/monitoring"
+
+  name                   = var.name
+  alarm_email            = var.budget_email
+  kms_key_arn            = module.data.kms_key_arn
+  api_id                 = aws_apigatewayv2_api.api.id
+  function_names         = module.api.function_names
+  log_group_names        = module.api.log_group_names
+  queue_name             = module.data.queue_name
+  dead_letter_queue_name = module.data.dead_letter_queue_name
+}
+
 # Only the API's role may put scans on the queue. The worker trusts a message's ids, so
 # the right to send is part of the trust boundary (review of #26).
 data "aws_iam_policy_document" "queue" {

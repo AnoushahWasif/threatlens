@@ -6,3 +6,7 @@ output "api_role_arn" {
 output "function_names" {
   value = { for k, f in aws_lambda_function.function : k => f.function_name }
 }
+
+output "log_group_names" {
+  value = { for k, g in aws_cloudwatch_log_group.function : k => g.name }
+}

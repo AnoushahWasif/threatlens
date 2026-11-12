@@ -290,6 +290,27 @@ def test_a_failed_scan_logs_why(client, app, lines):
     assert "no longer there" in failed["reason"]
 
 
+def test_a_failed_attempt_is_logged_apart_from_a_failed_scan(client, app, lines):
+    # The alarms count "scan attempt failed" (our fault) separately from "scan failed",
+    # which is often the user's (a bad file, a missing repo): infra/modules/monitoring.
+    runner = app.state.local_runner
+
+    def broken(project_id, deps):
+        raise RuntimeError("osv down")
+
+    runner.worker.pipeline = broken
+    project = client.post("/projects", json={"name": "p"}).json()["id"]
+    client.post(
+        f"/projects/{project}/scans", params={"filename": "requirements.txt"}, content=REQUIREMENTS
+    )
+    runner.run_pending()  # retried until the scan gives up
+    attempts = [e for e in lines() if e["message"] == "scan attempt failed"]
+    assert [a["attempt"] for a in attempts] == [1, 2, 3]  # MAX_ATTEMPTS
+    assert {(a["level"], a["error"]) for a in attempts} == {("ERROR", "RuntimeError")}
+    [failed] = [e for e in lines() if e["message"] == "scan failed"]
+    assert failed["level"] == "WARNING" and failed["reason"].startswith("The scan kept failing")
+
+
 def test_the_worker_clears_the_request_id_after_each_message(client, app, lines):
     runner = app.state.local_runner
     runner.worker.pipeline = fake_pipeline()
