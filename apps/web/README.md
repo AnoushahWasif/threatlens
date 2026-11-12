@@ -14,6 +14,25 @@ pnpm build               # writes out/
 
 Needs Node 22.12 or newer (Vite 8 / Vitest 5).
 
+End-to-end test (Playwright, Chromium): build against `/api` first, then run it. It starts the API in local mode and serves `out/` the way CloudFront does, using the real CloudFront function files, with `/api` passed to the API.
+
+```bash
+NEXT_PUBLIC_API_URL=/api NEXT_PUBLIC_AUTH_MODE=local pnpm build   # in PowerShell on Windows: Git Bash rewrites /api
+pnpm exec playwright install chromium                            # once
+pnpm test:e2e
+```
+
+One journey, in about 6 seconds:
+- sign in;
+- create a threat model, and see drafting refused because the server has no AI key;
+- add a threat, send it back to review, accept it again, and export the Markdown;
+- reload, to check the API saved it;
+- open a project's findings page from the list;
+- sign out;
+- a second user gets "doesn't exist, or you don't have access" for the first user's model.
+
+Any browser error or failed API call that isn't one of those two expected answers fails the test.
+
 Without `NEXT_PUBLIC_API_URL` the project list runs on labelled sample data. The projects API arrives on Day 13.
 
 Security headers (CSP, HSTS, frame options) are not set here: a static export has no server, so CloudFront adds them (Day 15/16).
