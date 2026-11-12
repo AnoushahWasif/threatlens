@@ -92,6 +92,20 @@ curl -X POST "$API/projects/$PROJECT/scans/github" -H "Authorization: Bearer $TO
 
 The worker pins the default branch to a commit, reads up to 20 `requirements*.txt`, `package-lock.json` and CycloneDX files from it, and scans them together; the scan record shows the commit. On `pallets/flask` the request answered in 0.01 s and the scan took 28 s: 21 dependencies from `examples/celery/requirements.txt`, 14 findings (werkzeug 2.3.3 and jinja2 3.1.2 at the top). Many repos only have `pnpm-lock.yaml`, `uv.lock` or `yarn.lock`, which the parser can't read yet; the scan then says which ones it found. Private repos aren't supported, and without a GitHub token the worker gets about 30 repo scans an hour.
 
+## Logs and alarms
+
+In AWS the API and worker write one JSON line per request and per scan. Each line carries the request id that the user sees in an error, and a scan's lines carry the id of the upload that started it. Bodies, tokens and exception messages are never logged; the caller appears only as a short hash.
+
+Terraform (not applied yet) adds 8 CloudWatch alarms, emailed to the budget address:
+- API 5xx errors and p95 latency
+- unhandled API errors
+- failing scan attempts
+- Lambda crashes
+- a dead-letter message
+- a scan waiting over 3 hours
+
+It also adds one dashboard. All of it stays inside CloudWatch's free tier. A scan that fails because of the user's file isn't alarmed.
+
 ## Architecture
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), which includes a threat model of ThreatLens itself.

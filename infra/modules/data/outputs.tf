@@ -26,6 +26,14 @@ output "queue_arn" {
   value = aws_sqs_queue.scans.arn
 }
 
+output "queue_name" {
+  value = aws_sqs_queue.scans.name
+}
+
+output "dead_letter_queue_name" {
+  value = aws_sqs_queue.scans_dead.name
+}
+
 output "dead_letter_queue_arn" {
   value = aws_sqs_queue.scans_dead.arn
 }
