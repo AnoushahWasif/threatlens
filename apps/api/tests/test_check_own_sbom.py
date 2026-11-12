@@ -55,3 +55,33 @@ def test_main_passes_quietly_on_a_good_file(tmp_path, capsys):
     path.write_bytes(sbom(FASTAPI, NEXT))
     check_own_sbom.main(["check_own_sbom.py", str(path)])
     assert capsys.readouterr().out == "PyPI packages: 1\nnpm packages: 1\n"
+
+
+def test_a_component_without_a_purl_that_isnt_a_lockfile_fails():
+    library = {"type": "library", "name": "mystery"}
+    found, _ = check_own_sbom.problems("own.cdx.json", sbom(LOCKFILE, FASTAPI, NEXT, library))
+    assert found == ["skipped mystery: no supported package URL (purl)"]
+
+
+def test_a_nested_lockfile_component_is_still_fine():
+    outer = {"type": "application", "name": "repo", "components": [LOCKFILE]}
+    found, _ = check_own_sbom.problems("own.cdx.json", sbom(outer, FASTAPI, NEXT))
+    assert found == []
+
+
+def test_an_application_with_a_purl_that_gets_skipped_fails():
+    odd = {"type": "application", "name": "tool", "purl": "pkg:npm/tool@"}
+    found, _ = check_own_sbom.problems("own.cdx.json", sbom(FASTAPI, NEXT, odd))
+    assert found == ["skipped pkg:npm/tool@: no supported package URL (purl)"]
+
+
+@pytest.mark.parametrize(
+    "dev",
+    [
+        {"type": "library", "name": "pytest", "purl": "pkg:pypi/pytest@8.3.0"},
+        {"type": "library", "name": "vitest", "purl": "pkg:npm/vitest@3.2.0"},
+    ],
+)
+def test_a_dev_only_tool_in_the_shipped_sbom_fails(dev):
+    found, _ = check_own_sbom.problems("own.cdx.json", sbom(FASTAPI, NEXT, dev))
+    assert found == [f"dev-only package {dev['name']}"]
