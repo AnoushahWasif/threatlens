@@ -81,6 +81,15 @@ class Worker:
 
     def handle(self, message: ScanMessage) -> None:
         """Returns when the message is dealt with. Raises if it should be delivered again."""
+        # Reset afterwards: the local worker thread and a warm Lambda handle many messages
+        # in one context.
+        token = logs.request_id.set(message.request_id)
+        try:
+            self._handle(message)
+        finally:
+            logs.request_id.reset(token)
+
+    def _handle(self, message: ScanMessage) -> None:
         found = self.repo.load_scan(message.owner, message.project_id, message.scan_id)
         if found is None:
             log.warning("scan message for a missing scan", extra={"scan_id": str(message.scan_id)})

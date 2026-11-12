@@ -110,9 +110,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.middleware("http")
     async def request_context(request: Request, call_next):
-        # Only accept a client-sent id if it looks like ours; otherwise it could inject into logs.
+        # Always our own id, so two clients can't share one. A client's id is only logged
+        # next to it, and only if it looks like ours.
+        request_id = uuid.uuid4().hex
         incoming = request.headers.get("x-request-id", "")
-        request_id = incoming if _valid_request_id(incoming) else uuid.uuid4().hex
+        client_id = incoming if logs.REQUEST_ID.match(incoming) else None
         request.state.request_id = request_id
         # Each request runs in its own task with its own copy of the context, so this
         # can't leak into the next request and needs no reset.
@@ -136,15 +138,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # The route's template (/projects/{project_id}), so requests group without ids; the
         # raw path only when nothing matched, cut short since it's whatever the client sent.
         route = request.scope.get("route")
-        log.info(
-            "request",
-            extra={
-                "method": request.method,
-                "route": getattr(route, "path", None) or request.url.path[:100],
-                "status": response.status_code,
-                "duration_ms": round((time.perf_counter() - started) * 1000, 1),
-            },
-        )
+        extra = {
+            "method": request.method,
+            "route": getattr(route, "path", None) or request.url.path[:100],
+            "status": response.status_code,
+            "duration_ms": round((time.perf_counter() - started) * 1000, 1),
+            # Set by current_user once the token checks out.
+            "user": getattr(request.state, "user_ref", None),
+        }
+        if client_id:
+            extra["client_request_id"] = client_id
+        log.info("request", extra=extra)
         return response
 
     @app.exception_handler(StarletteHTTPException)
@@ -185,10 +189,6 @@ def make_drafter(settings: Settings, secrets_client=None) -> Drafter | None:
         client = secrets_client or boto3.client("secretsmanager", region_name=settings.aws_region)
         return SecretKeyDrafter(settings.llm_api_key_secret_id, settings.llm_model, client)
     return None
-
-
-def _valid_request_id(value: str) -> bool:
-    return 8 <= len(value) <= 64 and all(c.isalnum() or c == "-" for c in value)
 
 
 app = create_app()

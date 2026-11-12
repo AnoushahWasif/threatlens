@@ -68,15 +68,68 @@ def test_other_values_are_written_as_text(lines):
     assert entry["thing"] == "{'a': [1, 2]}" and entry["number"] == 1.5
 
 
-def test_exceptions_get_their_class_and_a_capped_traceback(lines):
+def test_exceptions_get_their_class_and_frames_but_no_message(lines):
+    from pydantic import BaseModel, ValidationError
+
+    class Project(BaseModel):
+        name: int
+
+    def load(text):
+        try:
+            Project(name=text)
+        except ValidationError as e:
+            raise RuntimeError(f"couldn't load {text}") from e
+
+    # Built at run time: traceback lines quote the source, which never holds user data.
     try:
-        raise ValueError("boom " + "z" * 10_000)
+        load("my " + "sec" + "ret project")
+    except RuntimeError:
+        log.exception("failed")
+    [entry] = lines()
+    assert entry["level"] == "ERROR" and entry["error"] == "RuntimeError"
+    trace = entry["traceback"]
+    assert "ValidationError" in trace and "RuntimeError" in trace and "in load" in trace
+    assert trace.index("ValidationError") < trace.index("RuntimeError")  # cause first
+    assert "secret" not in lines.raw.getvalue()
+
+
+def test_an_error_raised_while_handling_another_keeps_both(lines):
+    try:
+        try:
+            {}["missing"]
+        except KeyError:
+            raise ValueError("cleanup failed")  # noqa: B904 - the implicit chain under test
     except ValueError:
         log.exception("failed")
     [entry] = lines()
-    assert entry["level"] == "ERROR" and entry["error"] == "ValueError"
+    assert entry["traceback"].index("KeyError") < entry["traceback"].index("ValueError")
+
+
+def test_a_long_traceback_is_capped(lines):
+    error = None
+    for i in range(200):
+        try:
+            raise KeyError(i) from error
+        except KeyError as e:
+            error = e
+    try:
+        raise ValueError("last") from error
+    except ValueError:
+        log.exception("failed")
+    [entry] = lines()
     assert len(entry["traceback"]) == logs.MAX_TRACEBACK
-    assert "Traceback" not in entry["message"]
+    assert entry["traceback"].rstrip().endswith('raise ValueError("last") from error')
+
+
+def test_an_exception_chain_that_loops_still_logs(lines):
+    a, b = ValueError("a"), KeyError("b")
+    a.__context__, b.__context__ = b, a
+    try:
+        raise a
+    except ValueError:
+        log.exception("failed")
+    [entry] = lines()
+    assert entry["traceback"].count("ValueError") == 1
 
 
 def test_the_request_id_is_added_while_it_is_set(lines):
@@ -123,6 +176,35 @@ def test_one_line_per_request_with_the_route_template(client, lines):
     assert entry["status"] == 200
     assert entry["request_id"] == resp.headers["x-request-id"]
     assert isinstance(entry["duration_ms"], float)
+
+
+def test_the_request_line_says_who_without_their_id(client, anon, token, lines):
+    me = client.get("/projects")
+    other = anon.get("/projects", headers={"authorization": f"Bearer {token('bob')}"})
+    nobody = anon.get("/projects")
+    assert (me.status_code, other.status_code, nobody.status_code) == (200, 200, 401)
+    users = [e["user"] for e in lines() if e["message"] == "request"]
+    assert len(users[0]) == 16 and users[0] != users[1]
+    assert users[2] is None
+    assert "bob" not in lines.raw.getvalue()
+
+
+def test_a_client_request_id_is_logged_beside_ours(client, lines):
+    resp = client.get("/health", headers={"X-Request-ID": "abc-12345678"})
+    [entry] = [e for e in lines() if e["message"] == "request"]
+    assert entry["client_request_id"] == "abc-12345678"
+    assert entry["request_id"] == resp.headers["x-request-id"]
+
+
+@pytest.mark.parametrize(
+    "bad", ["x\r\nfake-log-line", "éééééééé", "short", "a" * 65, 'a"}{"level":"x"}']
+)
+def test_a_rejected_client_request_id_never_reaches_the_logs(client, lines, bad):
+    client.get("/health", headers={"X-Request-ID": bad.encode()})
+    [entry] = [e for e in lines() if e["message"] == "request"]
+    assert "client_request_id" not in entry
+    raw = lines.raw.getvalue()
+    assert "fake-log-line" not in raw and "ééé" not in raw and "short" not in raw
 
 
 def test_an_unknown_path_is_logged_cut_short(client, lines):
@@ -187,6 +269,9 @@ def test_a_finished_scan_logs_its_counts(client, app, lines):
     runner.run_pending()
     [done] = [e for e in lines() if e["message"] == "scan done"]
     assert done["scan_id"] == scan["id"]
+    # The upload's request id, so a user's report leads from the upload to the scan.
+    [upload] = [e for e in lines() if e["message"] == "request" and e["status"] == 202]
+    assert done["request_id"] == upload["request_id"]
     assert (done["dependencies"], done["findings"], done["attempt"]) == (2, 2, 1)
     assert isinstance(done["seconds"], float)
 
@@ -203,6 +288,17 @@ def test_a_failed_scan_logs_why(client, app, lines):
     [failed] = [e for e in lines() if e["message"] == "scan failed"]
     assert failed["level"] == "WARNING" and failed["scan_id"] == scan["id"]
     assert "no longer there" in failed["reason"]
+
+
+def test_the_worker_clears_the_request_id_after_each_message(client, app, lines):
+    runner = app.state.local_runner
+    runner.worker.pipeline = fake_pipeline()
+    project = client.post("/projects", json={"name": "p"}).json()["id"]
+    client.post(
+        f"/projects/{project}/scans", params={"filename": "requirements.txt"}, content=REQUIREMENTS
+    )
+    runner.run_pending()
+    assert logs.request_id.get() is None
 
 
 def test_prod_app_writes_json_to_stdout(capsys):
