@@ -16,7 +16,7 @@ variable "name" {
 }
 
 variable "budget_email" {
-  description = "Where the monthly budget alerts go."
+  description = "Where the monthly budget alerts and the CloudWatch alarms go."
   type        = string
 
   validation {

@@ -120,7 +120,9 @@ class Worker:
         try:
             self._run(scan, version)
         except Exception:
-            log.exception("scan failed", extra={"scan_id": str(scan.id), "attempt": scan.attempts})
+            log.exception(
+                "scan attempt failed", extra={"scan_id": str(scan.id), "attempt": scan.attempts}
+            )
             if scan.attempts >= MAX_ATTEMPTS:
                 self._fail(scan, version, "The scan kept failing. Upload the file again later")
                 return

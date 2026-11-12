@@ -76,6 +76,20 @@ curl -X POST "$API/projects/$PROJECT/scans?filename=requirements.txt" \
 
 The API reads the file straight away (CycloneDX JSON, `requirements.txt` or `package-lock.json`, up to 1 MB) and refuses a bad one with a 422. The network part, OSV, EPSS and KEV, runs in a worker from a queue. On a real 4-line `requirements.txt` the upload answered in 0.22 s, and the scan finished 22 s later with 24 findings. A partial scan (OSV or EPSS couldn't answer for some packages) says so in its counts instead of looking clean. Locally the worker is a thread inside the API; in AWS it will be a Lambda fed by SQS (day 15). Limits: 10 scans per user per hour.
 
+## Logs and alarms
+
+In AWS the API and worker write one JSON line per request and per scan. Each line carries the request id that the user sees in an error, and a scan's lines carry the id of the upload that started it. Bodies, tokens and exception messages are never logged; the caller appears only as a short hash.
+
+Terraform (not applied yet) adds 8 CloudWatch alarms, emailed to the budget address:
+- API 5xx errors and p95 latency
+- unhandled API errors
+- failing scan attempts
+- Lambda crashes
+- a dead-letter message
+- a scan waiting over 3 hours
+
+It also adds one dashboard. All of it stays inside CloudWatch's free tier. A scan that fails because of the user's file isn't alarmed.
+
 ## Architecture
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), which includes a threat model of ThreatLens itself.
