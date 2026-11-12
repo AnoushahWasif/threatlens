@@ -400,11 +400,24 @@ def test_s3_round_trip_with_kms_and_missing_key(aws):
 
 def test_sqs_message_carries_ids_only(aws):
     _, sqs, url = aws
-    message = ScanMessage(owner="alice", project_id=uuid4(), scan_id=uuid4())
+    message = ScanMessage(
+        owner="alice", project_id=uuid4(), scan_id=uuid4(), request_id="0123456789abcdef"
+    )
     SqsQueue(sqs, url).send(message)
     (received,) = sqs.receive_message(QueueUrl=url)["Messages"]
-    assert set(json.loads(received["Body"])) == {"owner", "project_id", "scan_id"}
+    assert set(json.loads(received["Body"])) == {"owner", "project_id", "scan_id", "request_id"}
     assert parse_message(received["Body"]) == message
+
+
+def test_a_message_from_before_request_ids_still_parses():
+    body = json.dumps({"owner": "alice", "project_id": str(uuid4()), "scan_id": str(uuid4())})
+    assert parse_message(body).request_id is None
+
+
+@pytest.mark.parametrize("bad", ["short", "x" * 65, 'a"}\n{"forged', "éééééééé", 5])
+def test_a_message_with_a_bad_request_id_is_dropped(bad):
+    body = {"owner": "alice", "project_id": str(uuid4()), "scan_id": str(uuid4())}
+    assert parse_message(json.dumps(body | {"request_id": bad})) is None
 
 
 def test_s3_and_sqs_outages_are_503():

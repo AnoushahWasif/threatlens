@@ -80,7 +80,8 @@ async def start_scan(
     await run_in_threadpool(state.blobs.put, upload_key(scan), data)
     await run_in_threadpool(state.repo.create_scan, scan)
     try:
-        await run_in_threadpool(state.scan_queue.send, ScanMessage.for_scan(scan))
+        message = ScanMessage.for_scan(scan, request.state.request_id)
+        await run_in_threadpool(state.scan_queue.send, message)
     except ApiError:
         # Never leave a scan that says "queued" when nothing will ever run it.
         scan.status, scan.error = ScanStatus.FAILED, "Couldn't start the scan. Try again"

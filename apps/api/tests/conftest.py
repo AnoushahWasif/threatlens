@@ -1,3 +1,4 @@
+import logging
 import os
 import uuid
 
@@ -13,6 +14,16 @@ from threatlens_api.settings import Settings
 # Set in CI to a DynamoDB Local container: the whole suite then runs against the real
 # engine instead of the in-memory store. Repository tests use moto when it's unset.
 DYNAMODB_URL = os.environ.get("THREATLENS_TEST_DYNAMODB_URL")
+
+
+@pytest.fixture(autouse=True)
+def restore_logging():
+    # A prod app replaces the root logger's handlers with its JSON one; put pytest's back.
+    root = logging.getLogger()
+    handlers, level = root.handlers[:], root.level
+    yield
+    root.handlers[:] = handlers
+    root.setLevel(level)
 
 
 @pytest.fixture

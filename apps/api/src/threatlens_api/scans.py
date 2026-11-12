@@ -17,6 +17,7 @@ from uuid import UUID, uuid4
 from botocore.exceptions import BotoCoreError, ClientError
 from pydantic import Field
 
+from threatlens_api import logs
 from threatlens_api.errors import ApiError
 from threatlens_api.models import Strict, _now
 
@@ -138,10 +139,14 @@ class ScanMessage(Strict):
     owner: str = Field(pattern=_SUB.pattern)
     project_id: UUID
     scan_id: UUID
+    # The upload request's id, so the worker's lines can be found from it.
+    request_id: str | None = Field(default=None, pattern=logs.REQUEST_ID.pattern)
 
     @classmethod
-    def for_scan(cls, scan: Scan) -> "ScanMessage":
-        return cls(owner=scan.owner_id, project_id=scan.project_id, scan_id=scan.id)
+    def for_scan(cls, scan: Scan, request_id: str | None = None) -> "ScanMessage":
+        return cls(
+            owner=scan.owner_id, project_id=scan.project_id, scan_id=scan.id, request_id=request_id
+        )
 
 
 class ScanQueue(Protocol):

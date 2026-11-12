@@ -20,6 +20,7 @@ def prod(**overrides):
         "store": "dynamodb",
         "scan_queue_url": "https://sqs.eu-west-2.amazonaws.com/123456789012/threatlens-scans",
         "uploads_bucket": "threatlens-uploads",
+        "log_format": "json",
         **COGNITO,
     }
     return Settings(**{**values, **overrides}, _env_file=None)
