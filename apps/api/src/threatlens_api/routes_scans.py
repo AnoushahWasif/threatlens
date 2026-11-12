@@ -114,7 +114,8 @@ def _take_scan_budget(state, user_id: str) -> None:
 async def _queue(state, scan: Scan, response: Response) -> Scan:
     await run_in_threadpool(state.repo.create_scan, scan)
     try:
-        await run_in_threadpool(state.scan_queue.send, ScanMessage.for_scan(scan))
+        message = ScanMessage.for_scan(scan, request.state.request_id)
+        await run_in_threadpool(state.scan_queue.send, message)
     except ApiError:
         # Never leave a scan that says "queued" when nothing will ever run it.
         scan.status, scan.error = ScanStatus.FAILED, "Couldn't start the scan. Try again"

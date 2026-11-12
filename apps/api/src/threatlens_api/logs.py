@@ -6,20 +6,41 @@ error class names: never request bodies, tokens or uploaded files. Values are cu
 hundred characters and JSON-escaped, so a value can't forge a second log line.
 """
 
+import hashlib
 import json
 import logging
+import re
 import sys
+import traceback
 from contextvars import ContextVar
 from datetime import UTC, datetime
 
 MAX_VALUE = 300
 MAX_TRACEBACK = 4_000
 
-# Set by the API's middleware; FastAPI's threadpool copies it into sync routes.
+# Set by the API's middleware (FastAPI's threadpool copies it into sync routes), and by
+# the worker from the scan message, so a scan's lines carry the id of the upload request.
 request_id: ContextVar[str | None] = ContextVar("request_id", default=None)
+REQUEST_ID = re.compile(r"^[A-Za-z0-9-]{8,64}$")
 
 # Attributes every LogRecord has; anything else on a record came from `extra`.
 _STANDARD = set(vars(logging.LogRecord("", 0, "", 0, "", None, None))) | {"message", "taskName"}
+
+
+def user_ref(user_id: str) -> str:
+    """Who made a call, without writing the id itself (local ids contain the username)."""
+    return hashlib.sha256(user_id.encode()).hexdigest()[:16]
+
+
+def _frames(exc: BaseException) -> str:
+    # Frames and exception classes, never messages: a pydantic ValidationError's message
+    # quotes the input it rejected, which can be a user's own text.
+    parts, seen = [], set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        parts.append(type(exc).__name__ + "\n" + "".join(traceback.format_tb(exc.__traceback__)))
+        exc = exc.__cause__ or exc.__context__
+    return "--- raised while handling ---\n".join(reversed(parts))
 
 
 def _clean(value):
@@ -42,10 +63,9 @@ class JsonFormatter(logging.Formatter):
         for key, value in vars(record).items():
             if key not in _STANDARD and key not in entry:
                 entry[key] = _clean(value)
-        if record.exc_info and record.exc_info[0] is not None:
-            entry["error"] = record.exc_info[0].__name__
-            trace = self.formatException(record.exc_info)
-            entry["traceback"] = trace[-MAX_TRACEBACK:]
+        if record.exc_info and record.exc_info[1] is not None:
+            entry["error"] = type(record.exc_info[1]).__name__
+            entry["traceback"] = _frames(record.exc_info[1])[-MAX_TRACEBACK:]
         return json.dumps(entry, ensure_ascii=False, default=str)
 
 
