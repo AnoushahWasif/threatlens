@@ -108,7 +108,7 @@ It also adds one dashboard. All of it stays inside CloudWatch's free tier. A sca
 
 ## Architecture
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), which includes a threat model of ThreatLens itself.
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), which includes a threat model of ThreatLens itself. [docs/WELL-ARCHITECTED.md](docs/WELL-ARCHITECTED.md) reviews it against the six AWS Well-Architected pillars, with a monthly cost estimate (about $1.40 idle).
 
 ## License
 
