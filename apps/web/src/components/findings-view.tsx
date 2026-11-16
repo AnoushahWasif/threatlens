@@ -4,12 +4,13 @@ import Link from "next/link";
 
 import { FindingsSummary } from "@/components/findings-summary";
 import { FindingsTable } from "@/components/findings-table";
+import { ScanUpload } from "@/components/scan-upload";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useFindings } from "@/hooks/use-findings";
 
 export function FindingsView({ projectId }: { projectId: string }) {
-  const { state, retry } = useFindings(projectId);
+  const { state, retry, refresh } = useFindings(projectId);
 
   if (state.status === "loading") {
     return (
@@ -45,6 +46,7 @@ export function FindingsView({ projectId }: { projectId: string }) {
           Sample data: no API is configured (set <code>NEXT_PUBLIC_API_URL</code>).
         </p>
       )}
+      {state.source === "api" && <ScanUpload projectId={projectId} onScanned={refresh} />}
       <FindingsSummary findings={state.findings} />
       <FindingsTable findings={state.findings} />
     </div>

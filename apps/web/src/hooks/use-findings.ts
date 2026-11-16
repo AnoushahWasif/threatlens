@@ -39,5 +39,8 @@ export function useFindings(projectId: string) {
     setAttempt((n) => n + 1);
   }, []);
 
-  return { state, retry };
+  /** Loads again but keeps showing the current findings until the new ones arrive. */
+  const refresh = useCallback(() => setAttempt((n) => n + 1), []);
+
+  return { state, retry, refresh };
 }

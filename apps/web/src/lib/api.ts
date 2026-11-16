@@ -5,6 +5,7 @@ import { apiBaseUrl } from "@/lib/config";
 import { endSession, readSession } from "@/lib/session";
 import { type Finding, findingListSchema, sampleFindings } from "@/lib/findings";
 import { projectListSchema, SAMPLE_PROJECTS, type Project } from "@/lib/projects";
+import { type Scan, scanSchema, uploadName } from "@/lib/scans";
 import { sampleThreatModels } from "@/lib/sample-threat-models";
 import {
   type DraftResult,
@@ -36,7 +37,12 @@ type Options = {
   /** Leave out to use the signed-in session; null sends no token. */
   token?: string | null;
 };
-type Init = { method?: "GET" | "POST" | "PATCH" | "DELETE"; body?: unknown };
+type Init = {
+  method?: "GET" | "POST" | "PATCH" | "DELETE";
+  body?: unknown;
+  /** Sent as it is (a file), instead of `body` as JSON. */
+  bytes?: Blob;
+};
 
 export type FindingsResult = { source: "api" | "sample"; findings: Finding[] };
 
@@ -96,13 +102,14 @@ async function request<T>(
     try {
       const hasBody = init.body !== undefined;
       const headers: Record<string, string> = { accept: "application/json" };
-      if (hasBody) headers["content-type"] = "application/json";
+      if (init.bytes) headers["content-type"] = "application/octet-stream";
+      else if (hasBody) headers["content-type"] = "application/json";
       if (token) headers.authorization = `Bearer ${token}`;
       response = await fetchImpl(url, {
         method: init.method ?? "GET",
         signal,
         headers,
-        body: hasBody ? JSON.stringify(init.body) : undefined,
+        body: init.bytes ?? (hasBody ? JSON.stringify(init.body) : undefined),
         credentials: "omit",
         redirect: "error",
         cache: "no-store",
@@ -167,6 +174,34 @@ async function httpError(response: Response): Promise<ApiError> {
   const seconds = header && /^\d{1,6}$/.test(header) ? Number(header) : undefined;
   const retryAfter = seconds === undefined ? undefined : Math.min(seconds, MAX_RETRY_AFTER);
   return new ApiError("http", response.status, code, retryAfter);
+}
+
+// --- scans -----------------------------------------------------------------------
+
+/** Uploads a lockfile or SBOM. The API parses it at once (422 bad_file) and queues the scan. */
+export async function uploadScan(projectId: string, file: File, options: Options = {}): Promise<Scan> {
+  const baseUrl = options.baseUrl === undefined ? apiBaseUrl() : options.baseUrl;
+  if (baseUrl === null) throw new ApiError("network");
+  const name = uploadName(file.name);
+  if (!UUID.test(projectId) || name === null) throw new ApiError("invalid");
+  const url = `${baseUrl}/projects/${projectId}/scans?filename=${encodeURIComponent(name)}`;
+  return notFoundAs404(request(url, scanSchema, options, { method: "POST", bytes: file }));
+}
+
+export async function fetchScan(projectId: string, scanId: string, options: Options = {}): Promise<Scan> {
+  const baseUrl = options.baseUrl === undefined ? apiBaseUrl() : options.baseUrl;
+  if (baseUrl === null) throw new ApiError("network");
+  if (!UUID.test(projectId) || !UUID.test(scanId)) throw new ApiError("not-found");
+  return notFoundAs404(getJson(`${baseUrl}/projects/${projectId}/scans/${scanId}`, scanSchema, options));
+}
+
+async function notFoundAs404<T>(call: Promise<T>): Promise<T> {
+  try {
+    return await call;
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) throw new ApiError("not-found", 404);
+    throw error;
+  }
 }
 
 // --- local sign-in -----------------------------------------------------------

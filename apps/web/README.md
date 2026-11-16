@@ -44,6 +44,10 @@ Security headers (CSP, HSTS, frame options) are not set here: a static export ha
 - `/sign-in`, `/auth/callback`: sign-in (a username form against the API's local issuer in dev, Cognito's hosted page in prod). Every other page sends a signed-out visitor here and back. With no API configured there's nothing to sign in to, and the pages show labelled sample data. In dev, restarting the API signs everyone out: its stand-in issuer makes a new key at each start, so old tokens get a 401. That's on purpose.
 - `/`: project list.
 - `/findings?project=<id>`: summary and findings for one project.
+  - Scan a lockfile or SBOM (up to 1 MB).
+    - Empty and oversized files are refused before upload, and odd file names are tidied to the API's pattern.
+    - The page then follows the scan (every 2 s, then every 5 s; it gives up after 15 minutes or 5 failed checks in a row) and reloads the findings when it's done.
+    - A partial scan (packages unchecked, no EPSS, KEV missing or stale) says so instead of reading as clean, and skipped entries are listed with their reasons.
   - Four headline numbers: findings, in CISA KEV, not scored, packages affected.
   - Two charts: findings per severity, and the riskiest packages by their highest risk score.
   - Below that, a sortable, filterable table with a detail drawer.

@@ -4,13 +4,16 @@ import {
   ApiError,
   fetchFindings,
   fetchProjects,
+  fetchScan,
   MAX_RESPONSE_BYTES,
   requestLocalToken,
   threatModelBackend,
   TIMEOUT_MS,
+  uploadScan,
 } from "@/lib/api";
 import { SAMPLE_FINDINGS } from "@/lib/findings";
 import { MAX_PROJECTS, SAMPLE_PROJECTS } from "@/lib/projects";
+import { SCAN } from "@/lib/scan-fixture";
 import { clearSession, readSession, saveSession, SIGNED_OUT_EVENT } from "@/lib/session";
 
 const BASE = "https://api.threatlens.dev";
@@ -351,5 +354,59 @@ describe("auth on API calls", () => {
     expect(url).toBe(`${BASE}/dev/token`);
     expect(init?.headers).not.toHaveProperty("authorization");
     expect(JSON.parse(String(init?.body))).toEqual({ username: "bob" });
+  });
+});
+
+describe("scans", () => {
+  const file = (name: string, text = "jinja2==2.10\n") => new File([text], name, { type: "text/plain" });
+
+  it("uploads the file as it is, with a tidied name, and validates the answer", async () => {
+    const fetchImpl = respond({ ...SCAN, status: "queued" }, { status: 202 });
+    const scan = await uploadScan(PROJECT.id, file("requirements (1).txt"), {
+      baseUrl: BASE,
+      fetchImpl,
+      token: "t".repeat(30),
+    });
+    expect(scan.status).toBe("queued");
+    const [url, init] = fetchImpl.mock.calls[0];
+    expect(url).toBe(`${BASE}/projects/${PROJECT.id}/scans?filename=requirements--1-.txt`);
+    expect(init?.method).toBe("POST");
+    expect(init?.headers).toMatchObject({ "content-type": "application/octet-stream" });
+    expect(await (init?.body as Blob).text()).toBe("jinja2==2.10\n");
+  });
+
+  it("keeps the error code and wait from a refusal", async () => {
+    const fetchImpl = respond(
+      { error: { code: "scan_limit", message: "Too many scans this hour" } },
+      { status: 429, headers: { "retry-after": "120" } },
+    );
+    const error = await failure(uploadScan(PROJECT.id, file("uv.lock"), { baseUrl: BASE, fetchImpl, token: null }));
+    expect([error.code, error.retryAfter]).toEqual(["scan_limit", 120]);
+  });
+
+  it("refuses a bad project id or file name without a request", async () => {
+    const fetchImpl = vi.fn<typeof fetch>();
+    expect((await failure(uploadScan("../x", file("uv.lock"), { baseUrl: BASE, fetchImpl }))).kind).toBe("invalid");
+    expect((await failure(uploadScan(PROJECT.id, file("日本語"), { baseUrl: BASE, fetchImpl }))).kind).toBe("invalid");
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("needs the API: no sample scans", async () => {
+    expect((await failure(uploadScan(PROJECT.id, file("uv.lock"), { baseUrl: null }))).kind).toBe("network");
+  });
+
+  it("reads a scan's status, and a 404 is not-found", async () => {
+    const scan = await fetchScan(PROJECT.id, SCAN.id, { baseUrl: BASE, fetchImpl: respond(SCAN), token: null });
+    expect(scan.findings).toBe(3);
+    const gone = respond({ error: { code: "not_found" } }, { status: 404 });
+    expect((await failure(fetchScan(PROJECT.id, SCAN.id, { baseUrl: BASE, fetchImpl: gone, token: null }))).kind).toBe(
+      "not-found",
+    );
+  });
+
+  it("checks both ids before they go into the path", async () => {
+    const fetchImpl = vi.fn<typeof fetch>();
+    await failure(fetchScan(PROJECT.id, "../../admin", { baseUrl: BASE, fetchImpl }));
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 });
