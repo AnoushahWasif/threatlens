@@ -33,10 +33,13 @@ async function signIn(page: Page, username: string) {
   await expect(page).toHaveURL("/");
 }
 
-test("sign in, build a threat model, export it, find the project", async ({ page }) => {
+test("sign in, build a threat model, export it, scan a lockfile", async ({ page }) => {
+  // The scan calls the real OSV, EPSS and KEV services from the worker.
+  test.setTimeout(150_000);
   const problems = watch(page, [
     /^503 \/api\/threat-models\/[0-9a-f-]+\/draft$/, // no AI key: drafting is off
     /^404 \/api\/threat-models\/[0-9a-f-]+$/, // bob opening alice's model
+    /^422 \/api\/projects\/[0-9a-f-]+\/scans$/, // a file ThreatLens can't read
   ]);
 
   // Signed out, every page sends you to sign in.
@@ -45,7 +48,7 @@ test("sign in, build a threat model, export it, find the project", async ({ page
   await signIn(page, "alice");
   await expect(page.getByText("No projects yet")).toBeVisible();
 
-  // A threat model is a project with an architecture description.
+  // Threat models are their own thing: a system description and its threats.
   await page.getByRole("link", { name: "Threat model" }).click();
   await page.getByLabel("Name").fill("Shop");
   await page.getByLabel("Architecture description").fill(ARCHITECTURE);
@@ -99,6 +102,34 @@ test("sign in, build a threat model, export it, find the project", async ({ page
   await page.goto("/");
   await page.getByRole("link", { name: "Shop backend" }).click();
   await expect(page).toHaveURL(/\/findings\?project=/);
+  await expect(page.getByText("No findings", { exact: true })).toBeVisible();
+
+  // Scanning: an empty file never leaves the browser, a file the API can't read gets a
+  // fixed message, and a real one is followed until it finishes.
+  const picker = page.getByLabel("Scan a lockfile or SBOM");
+  const scan = page.getByRole("button", { name: "Scan", exact: true });
+  await picker.setInputFiles({ name: "empty.txt", mimeType: "text/plain", buffer: Buffer.from("") });
+  await scan.click();
+  await expect(page.getByText("That file is empty.")).toBeVisible();
+  await picker.setInputFiles({ name: "notes.md", mimeType: "text/plain", buffer: Buffer.from("hello") });
+  await scan.click();
+  await expect(page.getByText("ThreatLens couldn't read that file.")).toBeVisible();
+  await picker.setInputFiles({
+    name: "requirements (1).txt", // tidied to requirements--1-.txt for the API
+    mimeType: "text/plain",
+    buffer: Buffer.from("jinja2==2.10\nflask>=2.0\n"),
+  });
+  await scan.click();
+  const outcome = page.getByText(/^requirements--1-\.txt: .* in 1 package/);
+  await expect(outcome).toBeVisible({ timeout: 120_000 });
+  // flask>=2.0 has no exact version, so it's listed as skipped.
+  await page.getByText("1 entry skipped").click();
+  await expect(page.getByText("not pinned to an exact version")).toBeVisible();
+  // If OSV answered, jinja2 2.10's known advisories are now in the table; if it didn't,
+  // the outcome says the scan was partial instead of looking clean.
+  if (!(await outcome.textContent())?.includes("couldn't be checked")) {
+    await expect(page.getByRole("cell", { name: "jinja2" }).first()).toBeVisible();
+  }
 
   // Signing out ends the session; another user sees none of alice's work.
   await page.getByRole("button", { name: "Sign out" }).click();
