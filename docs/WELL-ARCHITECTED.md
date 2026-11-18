@@ -25,7 +25,8 @@ A review of ThreatLens against the six pillars of the AWS Well-Architected Frame
 
 **Gaps**
 - **No deploy pipeline.** Day 17 (GitHub Actions to AWS with OIDC) waits on the AWS account details. Until then, a deploy is the manual two-apply sequence in `infra/README.md`.
-- **No runbook.** An alarm email says what fired but not what to do. Each alarm needs a short "check this first" note.
+- **Runbook:** [RUNBOOK.md](RUNBOOK.md) says what to check first for each alarm. It's written from the code, so it needs checking after the first deploy.
+- **Drafting doesn't fit the API Lambda's 29 s timeout** (#51). The LLM call may take longer, and in AWS the draft would die as a Lambda timeout.
 - **No canary.** A deploy goes straight to all traffic. At this size, a smoke test against `/health` and one scan after each deploy is enough. Lambda aliases with weighted traffic would be the next step.
 - **Alarms only go to email.** That's fine for one person, but nobody is on call.
 
@@ -158,7 +159,8 @@ All three levels stay under the $10 budget alarm (decision 55). On an AWS accoun
    - CloudTrail and GuardDuty on the account.
    - An X-Ray sampling rule.
    - `user_pool_tier` set explicitly.
-   - A one-page runbook for the 8 alarms.
+   - A runbook for the 8 alarms: done, [RUNBOOK.md](RUNBOOK.md).
+   - Drafts that outlive the API Lambda's 29 s timeout (#51): at least fail cleanly, and agree how drafts should run.
 2. **After the first deploy:**
    - Measure cold starts and tune memory with real scans.
    - Try a point-in-time restore once and write the steps down.
