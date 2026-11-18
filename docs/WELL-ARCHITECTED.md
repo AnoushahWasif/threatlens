@@ -8,7 +8,7 @@ A review of ThreatLens against the six pillars of the AWS Well-Architected Frame
 
 | Pillar | Where it stands | Biggest gap |
 |--------|-----------------|-------------|
-| Operational excellence | Everything in Terraform, JSON logs with request ids, 8 alarms, a dashboard, one end-to-end test | No deploy pipeline yet (day 17), no runbook for the alarms |
+| Operational excellence | Everything in Terraform, JSON logs with request ids, 8 alarms, a dashboard, one end-to-end test | No deploy pipeline yet (day 17); drafts can outlive the API timeout (#51) |
 | Security | Two token checks, one IAM role per function naming single resources, one KMS key, private buckets, admin-created accounts, scans in CI | No WAF; the API is also reachable outside CloudFront |
 | Reliability | Queue with retries and a dead-letter queue, idempotent worker, optimistic locking, partial scans marked as such | One region, and point-in-time recovery has never been restored from |
 | Performance efficiency | Serverless sized to the work, static site on a CDN, bulk OSV calls with caching | Cold starts not measured; the API can only use 20 requests a second |
