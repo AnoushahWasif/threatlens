@@ -20,6 +20,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import APIRouter, Depends, Request
 from pydantic import Field
 
+from threatlens_api import logs
 from threatlens_api.errors import ApiError
 from threatlens_api.models import Strict
 
@@ -191,7 +192,9 @@ def current_user(request: Request) -> User:
         raise _unauthorized("auth_required", "Sign in to use this API")
     if len(token) > MAX_TOKEN_LENGTH:
         raise invalid_token()
-    return request.app.state.verifier.verify(token)
+    user = request.app.state.verifier.verify(token)
+    request.state.user_ref = logs.user_ref(user.id)  # for the access log line
+    return user
 
 
 CurrentUser = Annotated[User, Depends(current_user)]

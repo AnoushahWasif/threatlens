@@ -32,6 +32,7 @@ locals {
     THREATLENS_SCAN_QUEUE_URL        = var.queue_url
     THREATLENS_UPLOADS_BUCKET        = var.uploads_bucket
     THREATLENS_LLM_API_KEY_SECRET_ID = var.llm_secret_arn
+    THREATLENS_LOG_FORMAT            = "json"
     # Same origin as the web app (CloudFront /api), so no browser ever needs CORS.
     THREATLENS_CORS_ORIGINS = "[]"
   })

@@ -27,9 +27,11 @@ def test_request_id_generated(client):
     assert len(r.headers["X-Request-ID"]) == 32
 
 
-def test_valid_client_request_id_is_kept(client):
+def test_a_client_request_id_is_never_used_as_ours(client):
+    # Two clients sending the same id must still be told apart in the logs.
     r = client.get("/health", headers={"X-Request-ID": "abc-12345678"})
-    assert r.headers["X-Request-ID"] == "abc-12345678"
+    assert r.headers["X-Request-ID"] != "abc-12345678"
+    assert len(r.headers["X-Request-ID"]) == 32
 
 
 def test_malicious_request_id_is_replaced(client):
@@ -106,6 +108,7 @@ def test_docs_on_in_dev_off_in_prod(client):
         store="dynamodb",
         scan_queue_url="https://sqs.eu-west-2.amazonaws.com/123456789012/threatlens-scans",
         uploads_bucket="threatlens-uploads",
+        log_format="json",
         _env_file=None,
     )
     prod_client = TestClient(create_app(prod))

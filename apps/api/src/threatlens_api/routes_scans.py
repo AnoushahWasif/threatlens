@@ -72,7 +72,7 @@ async def start_scan(
         ],
     )
     await run_in_threadpool(state.blobs.put, upload_key(scan), data)
-    return await _queue(state, scan, response)
+    return await _queue(request, scan, response)
 
 
 class RepoScanRequest(Strict):
@@ -97,7 +97,7 @@ async def start_repo_scan(
         format="GitHub repo",
         repo=repo,
     )
-    return await _queue(state, scan, response)
+    return await _queue(request, scan, response)
 
 
 def _take_scan_budget(state, user_id: str) -> None:
@@ -111,10 +111,12 @@ def _take_scan_budget(state, user_id: str) -> None:
         )
 
 
-async def _queue(state, scan: Scan, response: Response) -> Scan:
+async def _queue(request: Request, scan: Scan, response: Response) -> Scan:
+    state = request.app.state
     await run_in_threadpool(state.repo.create_scan, scan)
     try:
-        await run_in_threadpool(state.scan_queue.send, ScanMessage.for_scan(scan))
+        message = ScanMessage.for_scan(scan, request.state.request_id)
+        await run_in_threadpool(state.scan_queue.send, message)
     except ApiError:
         # Never leave a scan that says "queued" when nothing will ever run it.
         scan.status, scan.error = ScanStatus.FAILED, "Couldn't start the scan. Try again"

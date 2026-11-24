@@ -1,4 +1,5 @@
 import logging
+import time
 import uuid
 from contextlib import asynccontextmanager
 
@@ -10,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from threatlens_api import __version__
+from threatlens_api import __version__, logs
 from threatlens_api.auth import JwksKeys, LocalIssuer, TokenVerifier, dev_router
 from threatlens_api.drafting import ClaudeDrafter, Drafter, SecretKeyDrafter
 from threatlens_api.errors import ApiError
@@ -45,6 +46,7 @@ def error(status: int, code: str, message: str, request_id: str, details=None) -
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
+    logs.configure(settings.log_format, settings.log_level)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -108,10 +110,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.middleware("http")
     async def request_context(request: Request, call_next):
-        # Only accept a client-sent id if it looks like ours; otherwise it could inject into logs.
+        # Always our own id, so two clients can't share one. A client's id is only logged
+        # next to it, and only if it looks like ours.
+        request_id = uuid.uuid4().hex
         incoming = request.headers.get("x-request-id", "")
-        request_id = incoming if _valid_request_id(incoming) else uuid.uuid4().hex
+        client_id = incoming if logs.REQUEST_ID.match(incoming) else None
         request.state.request_id = request_id
+        # Each request runs in its own task with its own copy of the context, so this
+        # can't leak into the next request and needs no reset.
+        logs.request_id.set(request_id)
+        started = time.perf_counter()
 
         length = request.headers.get("content-length")
         if length and length.isdigit() and int(length) > settings.max_request_bytes:
@@ -127,6 +135,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         response.headers["X-Request-ID"] = request_id
         response.headers.update(SECURITY_HEADERS)
+        # The route's template (/projects/{project_id}), so requests group without ids; the
+        # raw path only when nothing matched, cut short since it's whatever the client sent.
+        route = request.scope.get("route")
+        extra = {
+            "method": request.method,
+            "route": getattr(route, "path", None) or request.url.path[:100],
+            "status": response.status_code,
+            "duration_ms": round((time.perf_counter() - started) * 1000, 1),
+            # Set by current_user once the token checks out.
+            "user": getattr(request.state, "user_ref", None),
+        }
+        if client_id:
+            extra["client_request_id"] = client_id
+        log.info("request", extra=extra)
         return response
 
     @app.exception_handler(StarletteHTTPException)
@@ -167,10 +189,6 @@ def make_drafter(settings: Settings, secrets_client=None) -> Drafter | None:
         client = secrets_client or boto3.client("secretsmanager", region_name=settings.aws_region)
         return SecretKeyDrafter(settings.llm_api_key_secret_id, settings.llm_model, client)
     return None
-
-
-def _valid_request_id(value: str) -> bool:
-    return 8 <= len(value) <= 64 and all(c.isalnum() or c == "-" for c in value)
 
 
 app = create_app()
