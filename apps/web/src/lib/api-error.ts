@@ -35,6 +35,9 @@ export const KNOWN_CODES = [
   "storage_busy",
   "storage_unavailable",
   "write_limit",
+  "bad_file",
+  "scan_limit",
+  "queue_unavailable",
 ] as const;
 export type ApiErrorCode = (typeof KNOWN_CODES)[number];
 
