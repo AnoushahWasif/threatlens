@@ -27,12 +27,13 @@ test("clean URLs map to the exported files", () => {
   for (const [uri, expected] of Object.entries(cases)) assert.equal(rewrite(uri), expected, uri);
 });
 
-test("Next prefetch paths are rewritten to where the export put them", () => {
-  assert.equal(rewrite("/findings/__next.findings.__PAGE__.txt"), "/findings/__next.findings/__PAGE__.txt");
-  assert.equal(
-    rewrite("/auth/callback/__next.auth.callback.__PAGE__.txt"),
-    "/auth/callback/__next.auth/callback/__PAGE__.txt",
-  );
+test("Next prefetch paths are served as they are", () => {
+  for (const uri of [
+    "/findings/__next.findings.__PAGE__.txt",
+    "/auth/callback/__next.auth.callback.__PAGE__.txt",
+  ]) {
+    assert.equal(rewrite(uri), uri);
+  }
 });
 
 test("the query string is left alone", () => {
