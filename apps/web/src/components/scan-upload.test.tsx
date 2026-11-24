@@ -90,6 +90,7 @@ describe("ScanUpload", () => {
     render(<ScanUpload projectId={PROJECT} onScanned={onScanned} />);
     choose("uv.lock");
     submit();
+    await wait(0); // let the upload resolve, so polling starts at time 0
     await wait(2_000);
     expect(screen.getByText(/The scan kept failing/)).toBeInTheDocument();
     expect(onScanned).not.toHaveBeenCalled();
@@ -104,6 +105,7 @@ describe("ScanUpload", () => {
     render(<ScanUpload projectId={PROJECT} onScanned={vi.fn()} />);
     choose("uv.lock");
     submit();
+    await wait(0); // let the upload resolve, so polling starts at time 0
     await wait(6_000);
     expect(screen.getByText(/3 findings/)).toBeInTheDocument();
   });
@@ -114,6 +116,7 @@ describe("ScanUpload", () => {
     render(<ScanUpload projectId={PROJECT} onScanned={vi.fn()} />);
     choose("uv.lock");
     submit();
+    await wait(0); // let the upload resolve, so polling starts at time 0
     await wait(20_000);
     expect(screen.getByText(/Lost touch with the scan/)).toBeInTheDocument();
     expect(status).toHaveBeenCalledTimes(5);
@@ -127,6 +130,7 @@ describe("ScanUpload", () => {
     render(<ScanUpload projectId={PROJECT} onScanned={vi.fn()} />);
     choose("uv.lock");
     submit();
+    await wait(0); // let the upload resolve, so polling starts at time 0
     await wait(10_000);
     expect(screen.getByText("Your session has ended. Sign in again.")).toBeInTheDocument();
     expect(status).toHaveBeenCalledTimes(1);
@@ -139,6 +143,7 @@ describe("ScanUpload", () => {
     render(<ScanUpload projectId={PROJECT} onScanned={vi.fn()} now={() => clock} />);
     choose("uv.lock");
     submit();
+    await wait(0); // let the upload resolve, so polling starts at time 0
     await wait(2_000);
     clock = MAX_FOLLOW_MS + 1;
     await wait(5_000);
@@ -154,6 +159,7 @@ describe("ScanUpload", () => {
     const { unmount } = render(<ScanUpload projectId={PROJECT} onScanned={vi.fn()} />);
     choose("uv.lock");
     submit();
+    await wait(0); // let the upload resolve, so polling starts at time 0
     await wait(2_000);
     unmount();
     const calls = status.mock.calls.length;
@@ -171,6 +177,7 @@ describe("ScanUpload", () => {
     render(<ScanUpload projectId={PROJECT} onScanned={vi.fn()} />);
     choose("requirements.txt");
     submit();
+    await wait(0); // let the upload resolve, so polling starts at time 0
     await wait(2_000);
     expect(screen.getByText("25 entries skipped")).toBeInTheDocument();
     expect(screen.getByText("flask>=2.0")).toBeInTheDocument();
