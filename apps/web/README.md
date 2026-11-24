@@ -14,6 +14,8 @@ pnpm build               # writes out/
 
 Needs Node 22.12 or newer (Vite 8 / Vitest 5).
 
+The shadcn CLI is not a dependency: its one runtime file, `tailwind.css`, is copied into `src/app/shadcn-tailwind.css`. To add a component, run the CLI once with a pinned version: `pnpm dlx shadcn@4.23.0 add <name>`.
+
 Without `NEXT_PUBLIC_API_URL` the project list runs on labelled sample data. The projects API arrives on Day 13.
 
 Security headers (CSP, HSTS, frame options) are not set here: a static export has no server, so CloudFront adds them (Day 15/16).

@@ -33,7 +33,13 @@ infra/        Terraform for AWS (written and checked, not applied yet)
 docs/         architecture and threat model
 ```
 
-`make install`, `make lint` and `make test` run against the API. CI runs the same checks plus a Gitleaks scan of the full git history on every push.
+`make install`, `make lint` and `make test` run against the API. CI runs the same checks on every push, plus:
+
+- Gitleaks over the full git history
+- Semgrep (Python, TypeScript, React, OWASP Top 10 and GitHub Actions rule packs), failing on any finding
+- Trivy over both lockfiles, failing on a MEDIUM or worse vulnerability that has a fix, and over the Terraform for misconfigurations
+- a CycloneDX SBOM of ThreatLens itself (download it from the run's artifacts), which CI then feeds to ThreatLens's own parser
+- every GitHub Action pinned to a commit; Dependabot proposes updates weekly, once a release is a week old
 
 ## Threat-model drafting (API)
 
