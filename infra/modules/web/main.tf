@@ -209,7 +209,7 @@ resource "aws_cloudfront_response_headers_policy" "site" {
   }
 }
 
-resource "aws_cloudfront_distribution" "site" {
+resource "aws_cloudfront_distribution" "site" { # nosemgrep: terraform.aws.security.aws-cloudfront-insecure-tls.aws-insecure-cloudfront-distribution-tls-version - no custom domain yet, and the default certificate ignores minimum_protocol_version (WELL-ARCHITECTED.md, security gaps)
   enabled             = true
   comment             = "${var.name} web + /api"
   default_root_object = "index.html"
