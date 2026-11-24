@@ -4,14 +4,8 @@ function handler(event) {
   var request = event.request;
   var uri = request.uri;
 
-  // Next 16 prefetches /a/b/__next.a.b.__PAGE__.txt, but the export writes it as
-  // /a/b/__next.a/b/__PAGE__.txt (decision 18).
-  var prefetch = uri.match(/^(.*\/)__next\.([^\/]+)\.__PAGE__\.txt$/);
-  if (prefetch) {
-    request.uri = prefetch[1] + "__next." + prefetch[2].split(".").join("/") + "/__PAGE__.txt";
-    return request;
-  }
-
+  // Prefetch files (/a/b/__next.a.b.__PAGE__.txt) are served as they are: since Next 16.4.5
+  // the export writes them under the names browsers request (decision 52).
   if (uri === "/") {
     request.uri = "/index.html";
   } else if (uri.charAt(uri.length - 1) === "/") {

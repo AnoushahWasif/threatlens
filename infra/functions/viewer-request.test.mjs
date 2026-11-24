@@ -27,12 +27,13 @@ test("clean URLs map to the exported files", () => {
   for (const [uri, expected] of Object.entries(cases)) assert.equal(rewrite(uri), expected, uri);
 });
 
-test("Next prefetch paths are rewritten to where the export put them", () => {
-  assert.equal(rewrite("/findings/__next.findings.__PAGE__.txt"), "/findings/__next.findings/__PAGE__.txt");
-  assert.equal(
-    rewrite("/auth/callback/__next.auth.callback.__PAGE__.txt"),
-    "/auth/callback/__next.auth/callback/__PAGE__.txt",
-  );
+test("Next prefetch paths are served as they are", () => {
+  for (const uri of [
+    "/findings/__next.findings.__PAGE__.txt",
+    "/auth/callback/__next.auth.callback.__PAGE__.txt",
+  ]) {
+    assert.equal(rewrite(uri), uri);
+  }
 });
 
 test("the query string is left alone", () => {
@@ -57,10 +58,15 @@ test("every page and prefetch file of the real export is reachable", { skip: !ex
     const route = page === "/index.html" ? "/" : page.replace(/\.html$/, "");
     assert.ok(files.includes(rewrite(route)), `${route} -> ${rewrite(route)}`);
   }
-  for (const file of files.filter((f) => f.endsWith("/__PAGE__.txt") && f.includes("/__next."))) {
-    // /a/b/__next.a/b/__PAGE__.txt is fetched as /a/b/__next.a.b.__PAGE__.txt
+  // Without prefetch files this test would pass on nothing, so a change in Next's layout
+  // must fail it, listing what the export does contain.
+  const prefetch = files.filter((f) => f.includes("/__next.") && f.endsWith("__PAGE__.txt"));
+  assert.ok(prefetch.length > 0, `no prefetch files in the export:\n${files.join("\n")}`);
+  for (const file of prefetch) {
+    // Browsers fetch /a/b/__next.a.b.__PAGE__.txt. An export that writes that name as it is
+    // must be served as it is; one that writes /a/b/__next.a/b/__PAGE__.txt needs the rewrite.
     const m = file.match(/^(.*?\/)__next\.(.+)\/__PAGE__\.txt$/);
-    const requested = `${m[1]}__next.${m[2].split("/").join(".")}.__PAGE__.txt`;
-    assert.equal(rewrite(requested), file, requested);
+    const requested = m ? `${m[1]}__next.${m[2].split("/").join(".")}.__PAGE__.txt` : file;
+    assert.equal(rewrite(requested), file, `${requested}\nprefetch files:\n${prefetch.join("\n")}`);
   }
 });
