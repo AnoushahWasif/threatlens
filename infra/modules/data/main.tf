@@ -142,6 +142,21 @@ resource "aws_s3_bucket_lifecycle_configuration" "uploads" {
     }
   }
 
+  # Same for a GitHub scan's lockfiles: the repo itself is the lasting copy.
+  rule {
+    id     = "snapshots-expire"
+    status = "Enabled"
+    filter {
+      prefix = "snapshots/"
+    }
+    expiration {
+      days = 7
+    }
+    noncurrent_version_expiration {
+      noncurrent_days = 1
+    }
+  }
+
   # Findings files are kept (the newest scan's is what the web app shows); overwritten or
   # deleted versions go after a month.
   rule {

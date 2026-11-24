@@ -16,7 +16,7 @@ from uuid import UUID
 
 from pydantic import TypeAdapter
 
-from threatlens_api import ingest
+from threatlens_api import github, ingest
 from threatlens_api.epss import EpssClient
 from threatlens_api.kev import KevClient
 from threatlens_api.models import Dependency, Finding, _now
@@ -24,14 +24,17 @@ from threatlens_api.osv import OsvClient
 from threatlens_api.repository import Conflict, Repository
 from threatlens_api.risk import Enriched, enrich
 from threatlens_api.scans import (
+    MAX_SKIPPED_SHOWN,
     Blobs,
     MemoryQueue,
     Scan,
     ScanMessage,
     ScanStatus,
+    SkippedRef,
     findings_key,
     parse_message,
-    upload_key,
+    snapshot_key,
+    source_key,
 )
 
 # A scan still "running" after this is taken to be dead and is picked up again. The SQS
@@ -62,11 +65,13 @@ class Worker:
         blobs: Blobs,
         pipeline: Pipeline | None = None,
         clock: Callable = _now,
+        github_client: github.GithubClient | None = None,
     ):
         self.repo = repo
         self.blobs = blobs
         self._pipeline = pipeline
         self._clock = clock
+        self._github = github_client
 
     @property
     def pipeline(self) -> Pipeline:
@@ -78,6 +83,16 @@ class Worker:
     @pipeline.setter
     def pipeline(self, value: Pipeline) -> None:
         self._pipeline = value
+
+    @property
+    def github_client(self) -> "github.GithubClient":
+        if self._github is None:
+            self._github = github.GithubClient()
+        return self._github
+
+    @github_client.setter
+    def github_client(self, value: "github.GithubClient") -> None:
+        self._github = value
 
     def handle(self, message: ScanMessage) -> None:
         """Returns when the message is dealt with. Raises if it should be delivered again."""
@@ -98,7 +113,7 @@ class Worker:
             # Another worker has it. If that one dies, its own message comes back later.
             return
         if scan.attempts >= MAX_ATTEMPTS:
-            self._fail(scan, version, "The scan kept failing. Upload the file again later")
+            self._fail(scan, version, "The scan kept failing. Try again later")
             return
 
         scan.status, scan.started_at, scan.attempts = ScanStatus.RUNNING, now, scan.attempts + 1
@@ -109,11 +124,17 @@ class Worker:
         version += 1
 
         try:
+            # The commit is saved only after the snapshot is stored, so without one there
+            # is no usable snapshot yet (or its counts were lost): fetch again.
+            if scan.repo is not None and scan.commit is None:
+                version = self._snapshot(scan, version)
+                if version is None:
+                    return
             self._run(scan, version)
         except Exception:
             log.exception("scan failed", extra={"scan_id": str(scan.id), "attempt": scan.attempts})
             if scan.attempts >= MAX_ATTEMPTS:
-                self._fail(scan, version, "The scan kept failing. Upload the file again later")
+                self._fail(scan, version, "The scan kept failing. Try again later")
                 return
             # Hand it back, so the next delivery can start again straight away.
             scan.status = ScanStatus.QUEUED
@@ -121,10 +142,34 @@ class Worker:
                 self.repo.save_scan(scan, version)
             raise
 
+    def _snapshot(self, scan: Scan, version: int) -> int | None:
+        """First run of a GitHub scan: fetch the lockfiles and store them like an upload, so
+        a retry scans the same commit instead of fetching again. Returns the new record
+        version, or None when there's nothing more to do."""
+        try:
+            snapshot = self.github_client.snapshot(scan.repo)
+        except github.RepoError as e:
+            self._fail(scan, version, str(e)[:200])
+            return None
+        self.blobs.put(snapshot_key(scan), ingest.to_cyclonedx(snapshot.result.dependencies))
+        scan.commit = snapshot.commit
+        scan.dependencies = len(snapshot.result.dependencies)
+        scan.skipped = len(snapshot.result.skipped)
+        scan.skipped_examples = [
+            SkippedRef(ref=s.ref[:120], reason=s.reason[:200])
+            for s in snapshot.result.skipped[:MAX_SKIPPED_SHOWN]
+        ]
+        try:
+            self.repo.save_scan(scan, version)
+        except Conflict:
+            return None  # taken over; the other worker uses the snapshot just stored
+        return version + 1
+
     def _run(self, scan: Scan, version: int) -> None:
-        data = self.blobs.get(upload_key(scan))
+        data = self.blobs.get(source_key(scan))
         if data is None:
-            self._fail(scan, version, "The uploaded file is no longer there. Upload it again")
+            again = "Scan the repository again" if scan.repo else "Upload it again"
+            self._fail(scan, version, f"The scanned file is no longer there. {again}")
             return
         try:
             parsed = ingest.parse(scan.filename, data)

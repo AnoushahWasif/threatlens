@@ -5,11 +5,12 @@ from uuid import UUID
 
 from fastapi import APIRouter, Query, Request, Response
 from fastapi.concurrency import run_in_threadpool
+from pydantic import Field
 
-from threatlens_api import ingest
+from threatlens_api import github, ingest
 from threatlens_api.auth import CurrentUser
 from threatlens_api.errors import ApiError
-from threatlens_api.models import Finding
+from threatlens_api.models import Finding, Strict
 from threatlens_api.scans import (
     FILENAME,
     MAX_SKIPPED_SHOWN,
@@ -48,14 +49,7 @@ async def start_scan(
     # Someone else's project is a 404 before anything is read, stored or counted.
     await run_in_threadpool(state.projects.get, user.id, project_id)
 
-    wait = state.scan_budget.take(user.id)
-    if wait is not None:
-        raise ApiError(
-            429,
-            "scan_limit",
-            "Too many scans this hour",
-            headers={"Retry-After": str(math.ceil(wait))},
-        )
+    _take_scan_budget(state, user.id)
 
     data = await _read_body(request, state.settings.max_request_bytes)
     # Parsed now so a bad file is refused at once; the worker parses its stored copy again.
@@ -78,6 +72,46 @@ async def start_scan(
         ],
     )
     await run_in_threadpool(state.blobs.put, upload_key(scan), data)
+    return await _queue(state, scan, response)
+
+
+class RepoScanRequest(Strict):
+    repo: str = Field(min_length=1, max_length=300)
+
+
+@router.post("/scans/github", status_code=202)
+async def start_repo_scan(
+    project_id: UUID, body: RepoScanRequest, user: CurrentUser, request: Request, response: Response
+) -> Scan:
+    """Scans a public GitHub repo's lockfiles. The worker fetches them, so this returns at once."""
+    state = request.app.state
+    await run_in_threadpool(state.projects.get, user.id, project_id)
+    repo = github.parse_repo(body.repo)
+    if repo is None:
+        raise ApiError(422, "bad_repo", "Use owner/name or https://github.com/owner/name")
+    _take_scan_budget(state, user.id)
+    scan = Scan(
+        project_id=project_id,
+        owner_id=user.id,
+        filename="repo.cdx.json",
+        format="GitHub repo",
+        repo=repo,
+    )
+    return await _queue(state, scan, response)
+
+
+def _take_scan_budget(state, user_id: str) -> None:
+    wait = state.scan_budget.take(user_id)
+    if wait is not None:
+        raise ApiError(
+            429,
+            "scan_limit",
+            "Too many scans this hour",
+            headers={"Retry-After": str(math.ceil(wait))},
+        )
+
+
+async def _queue(state, scan: Scan, response: Response) -> Scan:
     await run_in_threadpool(state.repo.create_scan, scan)
     try:
         await run_in_threadpool(state.scan_queue.send, ScanMessage.for_scan(scan))
@@ -86,7 +120,7 @@ async def start_scan(
         scan.status, scan.error = ScanStatus.FAILED, "Couldn't start the scan. Try again"
         await run_in_threadpool(state.repo.save_scan, scan, 1)
         raise
-    response.headers["Location"] = f"/projects/{project_id}/scans/{scan.id}"
+    response.headers["Location"] = f"/projects/{scan.project_id}/scans/{scan.id}"
     return scan
 
 

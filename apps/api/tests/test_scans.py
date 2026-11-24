@@ -262,7 +262,7 @@ def test_a_crash_is_handed_back_then_given_up_after_three_attempts(setup):
         assert scan.attempts == attempt
     assert (scan.status, scan.error) == (
         ScanStatus.FAILED,
-        "The scan kept failing. Upload the file again later",
+        "The scan kept failing. Try again later",
     )
     assert "OSV client bug" not in scan.model_dump_json()  # internals stay in the logs
 

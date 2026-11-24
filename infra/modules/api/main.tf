@@ -151,6 +151,12 @@ data "aws_iam_policy_document" "worker" {
     resources = ["${var.uploads_bucket_arn}/findings/*"]
   }
   statement {
+    # A GitHub scan's lockfiles, fetched once so a retry scans the same commit.
+    sid       = "Snapshots"
+    actions   = ["s3:PutObject", "s3:GetObject"]
+    resources = ["${var.uploads_bucket_arn}/snapshots/*"]
+  }
+  statement {
     sid       = "ConsumeQueue"
     actions   = ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes"]
     resources = [var.queue_arn]

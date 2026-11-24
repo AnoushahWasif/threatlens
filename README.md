@@ -84,6 +84,14 @@ The API reads the file straight away (CycloneDX JSON, `requirements.txt`, `packa
 
 ThreatLens scanning its own lockfiles: `uv.lock` 55 packages, 0 findings in 3.1 s; `pnpm-lock.yaml` 729 packages, 2 findings in 3.6 s (deepmerge, removed on day 18, and minimatch 10.2.6 via typescript-eslint). Direct and transitive packages are told apart for `uv.lock`, `pnpm-lock.yaml` and `package-lock.json`; `poetry.lock` doesn't record it, so everything there counts as direct. Packages from a private index (poetry `legacy` sources, uv registry URLs other than PyPI) are checked as PyPI packages: if an internal package shares a public name, it gets the public package's advisories, which is also the name an attacker would use for dependency confusion.
 
+A public GitHub repo can be scanned by name instead:
+
+```bash
+curl -X POST "$API/projects/$PROJECT/scans/github" -H "Authorization: Bearer $TOKEN"   -H "Content-Type: application/json" -d '{"repo": "https://github.com/pallets/flask"}'
+```
+
+The worker pins the default branch to a commit, reads up to 20 `requirements*.txt`, `package-lock.json` and CycloneDX files from it, and scans them together; the scan record shows the commit. On `pallets/flask` the request answered in 0.01 s and the scan took 28 s: 21 dependencies from `examples/celery/requirements.txt`, 14 findings (werkzeug 2.3.3 and jinja2 3.1.2 at the top). Many repos only have `pnpm-lock.yaml`, `uv.lock` or `yarn.lock`, which the parser can't read yet; the scan then says which ones it found. Private repos aren't supported, and without a GitHub token the worker gets about 30 repo scans an hour.
+
 ## Architecture
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), which includes a threat model of ThreatLens itself.
