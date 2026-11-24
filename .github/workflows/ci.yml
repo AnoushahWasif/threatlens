@@ -186,6 +186,9 @@ jobs:
         env:
           NEXT_PUBLIC_API_URL: /api
           NEXT_PUBLIC_AUTH_MODE: local
+      # The CloudFront function against this exact export (skipped by the infra job, which
+      # doesn't build the site).
+      - run: node --test ../../infra/functions/viewer-request.test.mjs
       - run: pnpm exec playwright test
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: failure()
