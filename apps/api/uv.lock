@@ -1182,6 +1182,7 @@ dependencies = [
     { name = "mangum" },
     { name = "pydantic-settings" },
     { name = "pyjwt", extra = ["crypto"] },
+    { name = "pyyaml" },
 ]
 
 [package.dev-dependencies]
@@ -1200,6 +1201,7 @@ requires-dist = [
     { name = "mangum", specifier = ">=0.22,<0.23" },
     { name = "pydantic-settings", specifier = ">=2.6" },
     { name = "pyjwt", extras = ["crypto"], specifier = ">=2.15.1" },
+    { name = "pyyaml", specifier = ">=6.0.3" },
 ]
 
 [package.metadata.requires-dev]

@@ -1,7 +1,7 @@
 packages:
   - "apps/web"
 
-# Supply-chain settings (decision 67). A release must be a week old before it installs, the same
+# Supply-chain settings (decision 77). A release must be a week old before it installs, the same
 # wait Dependabot uses; dependencies of dependencies may only come from the registry; and a
 # package that was published with provenance can't be replaced by one published without.
 minimumReleaseAge: 10080
