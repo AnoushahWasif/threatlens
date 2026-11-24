@@ -2,6 +2,7 @@ import io
 import json
 import logging
 import sys
+from uuid import UUID
 
 import pytest
 from test_scans import REQUIREMENTS, fake_pipeline  # noqa: I001
@@ -274,6 +275,15 @@ def test_a_finished_scan_logs_its_counts(client, app, lines):
     assert done["request_id"] == upload["request_id"]
     assert (done["dependencies"], done["findings"], done["attempt"]) == (2, 2, 1)
     assert isinstance(done["seconds"], float)
+
+
+def test_a_repo_scan_carries_the_request_id_too(client, app):
+    project = client.post("/projects", json={"name": "p"}).json()["id"]
+    resp = client.post(f"/projects/{project}/scans/github", json={"repo": "octo/shop"})
+    assert resp.status_code == 202
+    message = app.state.local_runner.queue.items.get_nowait()
+    assert message.scan_id == UUID(resp.json()["id"])
+    assert message.request_id == resp.headers["x-request-id"]
 
 
 def test_a_failed_scan_logs_why(client, app, lines):
