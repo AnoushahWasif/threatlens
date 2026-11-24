@@ -30,7 +30,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       dynamodb:
-        image: amazon/dynamodb-local:3.3.1
+        image: amazon/dynamodb-local:3.3.1@sha256:ff89bd48ff32cd8d9be5fee8873b65b8854dc408f1afe881be6eb00247bc0dab
         ports:
           - 8000:8000
     env:
@@ -96,7 +96,7 @@ jobs:
         working-directory: infra
       - name: Trivy misconfiguration scan
         run: >-
-          docker run --rm -v "$PWD:/src" -w /src aquasec/trivy:0.75.0
+          docker run --rm -v "$PWD:/src" -w /src aquasec/trivy:0.75.0@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa
           config --exit-code 1 --ignorefile .trivyignore.yaml --skip-dirs infra/.terraform infra
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -132,7 +132,7 @@ jobs:
           persist-credentials: false
       - name: Semgrep
         run: >-
-          docker run --rm -v "$PWD:/src" -w /src semgrep/semgrep:1.183.0
+          docker run --rm -v "$PWD:/src" -w /src semgrep/semgrep:1.183.0@sha256:2e45517a85e13a9cca14a2a00df6bb48affd66b8ebfae1b0991cd57578362fb0
           semgrep scan --error --metrics=off
           --config p/python --config p/typescript --config p/react
           --config p/owasp-top-ten --config p/github-actions
@@ -148,12 +148,12 @@ jobs:
           persist-credentials: false
       - name: Trivy vulnerability scan
         run: >-
-          docker run --rm -v "$PWD:/src" -w /src aquasec/trivy:0.75.0
+          docker run --rm -v "$PWD:/src" -w /src aquasec/trivy:0.75.0@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa
           fs --scanners vuln --include-dev-deps --ignore-unfixed
           --severity MEDIUM,HIGH,CRITICAL --exit-code 1 .
       - name: SBOM of what ships (no dev tools)
         run: >-
-          docker run --rm -v "$PWD:/src" -w /src aquasec/trivy:0.75.0
+          docker run --rm -v "$PWD:/src" -w /src aquasec/trivy:0.75.0@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa
           fs --format cyclonedx --output threatlens.cdx.json .
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
       - run: uv run python scripts/check_own_sbom.py ../../threatlens.cdx.json
