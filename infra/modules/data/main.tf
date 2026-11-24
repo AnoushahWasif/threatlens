@@ -40,6 +40,23 @@ data "aws_iam_policy_document" "key" {
       values   = ["arn:${data.aws_partition.current.partition}:logs:${local.region}:${local.account}:log-group:*"]
     }
   }
+
+  # CloudWatch alarms publish to the encrypted alarm topic (monitoring module) as
+  # themselves, so they need the key too; only for this account's alarms.
+  statement {
+    sid       = "CloudWatchAlarms"
+    actions   = ["kms:Decrypt", "kms:GenerateDataKey*"]
+    resources = ["*"]
+    principals {
+      type        = "Service"
+      identifiers = ["cloudwatch.amazonaws.com"]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "aws:SourceAccount"
+      values   = [local.account]
+    }
+  }
 }
 
 resource "aws_kms_key" "data" {

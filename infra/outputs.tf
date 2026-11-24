@@ -31,3 +31,8 @@ output "web_build_env" {
     NEXT_PUBLIC_COGNITO_CLIENT_ID = module.auth.client_id
   }
 }
+
+output "dashboard" {
+  description = "CloudWatch dashboard name. Confirm the alarm email subscription once after the first apply."
+  value       = module.monitoring.dashboard_name
+}
